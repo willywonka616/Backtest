@@ -72,6 +72,38 @@ and objective, and shows:
 wins on the full period, or on one sub-period, is curve-fitting — not a strategy. Nothing here
 is investment advice.
 
+## Data verification
+
+Section 01 checks the committed price series against a live source (CoinGecko) on load,
+plus two checks that need no network at all: fixed price anchors (the all-time high has to
+land where independent aggregators put it) and shape diagnostics (real BTC returns are
+fat-tailed — a kurtosis near 3 would mean the series was generated from a normal distribution,
+not observed). The live check needs network access and same-origin fetch; it can't run under
+`file://` (CORS) and is reported as "unverified," not as a failure, in that case. Only a genuine
+mismatch against the live source disables the backtest controls — a stale file or an
+unreachable network never does.
+
+## Benchmarks: ceiling, floor, and significance
+
+Section 08 answers the question the raw comparison table can't: is a strategy's edge over DCA
+real, or is it noise? `perfectTiming()` computes the exact best- and worst-case allocation any
+timing rule could achieve under the same deposit-can-only-be-spent-later constraint — if the
+ceiling itself is only a few percent above DCA, no signal could have helped over that window,
+and the model isn't what to blame. `permutationTest()` reruns the ledger thousands of times
+with the same multipliers shuffled onto different months; if the real chronological order
+doesn't beat most of the shuffles, the observed edge came from the *size* of the multipliers,
+not their *timing*.
+
+## Rolling windows
+
+Section 09 slides a fixed-length window (24–60 months, selectable) across the entire available
+history and reruns the comparison in each one. A single full-period backtest is one
+observation; this shows the distribution. Consecutive windows share almost all their months, so
+the window *count* overstates how much independent evidence there is — the panel reports
+`effectiveN` (roughly `totalMonths / windowMonths`) alongside it, and always spans the full
+available history regardless of whatever period is selected for the main backtest above, since
+the point is to see how the result varies across different historical regimes.
+
 ## Assumptions and limitations
 
 - **USD only.** The power law is a USD-denominated relationship; converting results to another
@@ -90,11 +122,13 @@ rule have performed on the price history that actually happened," nothing more.
 
 ## Correctness checks
 
-Open `tests.html`. It runs plain-assertion checks (no framework) against `js/powerlaw.js` and
-`js/backtest.js`: ledger conservation, degenerate-boundary and zero-exponent equivalence to
-plain DCA, power-law fit recovery on synthetic data, XIRR sanity, and — the most important one —
-that the expanding fit mode never uses a fit whose window extends past the purchase date it's
-being applied to.
+Open `tests.html`. It runs plain-assertion checks (no framework) covering: ledger
+conservation, degenerate-boundary and zero-exponent equivalence to plain DCA, power-law fit
+recovery on synthetic data, XIRR sanity, the no-lookahead guarantee of the expanding fit,
+agreement between `Backtest.runLedger` and the shared `Benchmarks.simulateLedger` (there is
+exactly one implementation of the ledger arithmetic — two would drift apart and quietly
+invalidate every comparison the app makes), the ceiling/floor bracketing DCA, the permutation
+test's degenerate case, and the data-verification helpers.
 
 ## Repository layout
 
@@ -102,10 +136,13 @@ being applied to.
 index.html            markup + inline CSS
 js/data.js             BTC daily close series (committed, regenerate with tools/fetch-data.mjs)
 js/powerlaw.js          power-law OLS fitting (full + expanding modes)
-js/backtest.js          ledger simulation, calibration, metrics, XIRR
+js/backtest.js          ledger simulation (via js/benchmarks.js), calibration, metrics, XIRR
+js/benchmarks.js        shared simulateLedger(), perfect-timing ceiling/floor, permutation test
+js/rolling.js           rolling-window robustness study
+js/datacheck.js         live-source + anchor + shape verification of js/data.js
 js/optimizer.js         mMin/mMax grid search + robustness sub-periods
 js/optimizer-worker.js  Web Worker entry point for the optimizer sweep
-js/charts.js            chart construction (uPlot) + brush/heatmap handling
+js/charts.js            chart construction (uPlot + canvas) + brush/heatmap/histogram handling
 js/app.js               state, controls, wiring, rendering
 js/tests-core.js        correctness-check assertions, used by tests.html
 js/vendor/              vendored uPlot

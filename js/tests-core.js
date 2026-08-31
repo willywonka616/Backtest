@@ -5,6 +5,8 @@
 
   const PL = global.PowerLaw;
   const B = global.Backtest;
+  const BM = global.Benchmarks;
+  const R = global.Rolling;
 
   function approxEqual(a, b, tol) {
     return Math.abs(a - b) <= tol;
@@ -176,6 +178,133 @@
       ]);
       assert(xirr != null, "XIRR failed to converge");
       assert(approxEqual(xirr, 1.0, 0.001), `expected XIRR ~100%, got ${(xirr * 100).toFixed(3)}%`);
+    });
+
+    // 8. Shared ledger: Backtest.runLedger's DCA path and Benchmarks.simulateLedger
+    // must agree exactly — that agreement is the whole point of routing runLedger
+    // through simulateLedger instead of keeping a second copy of the loop.
+    check("8. runLedger and simulateLedger agree on plain DCA", (assert) => {
+      const data = global.BTC_DATA;
+      const ctx = B.prepareFairValueContext(data, "2018-01-01", "2022-12-01", "expanding");
+      const { trace } = B.runLedger(data, ctx, { p: 0, mMin: 0, mMax: 1e9, deposit: 500, startingBalance: 0 }, false);
+
+      const dates = BM.monthStarts("2018-01-01", "2022-12-01");
+      const prices = Float64Array.from(dates, BM.closeOn);
+      const ones = new Float64Array(prices.length).fill(1);
+      const direct = BM.simulateLedger(prices, ones, 500);
+
+      const last = trace[trace.length - 1];
+      assert(approxEqual(last.btc, direct.btc, 1e-9), `btc mismatch: runLedger=${last.btc} simulateLedger=${direct.btc}`);
+      assert(approxEqual(last.balance, direct.cashLeft, 1e-9), `cashLeft mismatch: runLedger=${last.balance} simulateLedger=${direct.cashLeft}`);
+    });
+
+    // 9. simulateLedger's debug mode (the ledger-conservation assertion
+    // INTEGRATION.md asked for) doesn't false-positive on an ordinary run,
+    // including with a non-zero starting balance.
+    check("9. simulateLedger debug mode passes on a normal run", (assert) => {
+      const data = global.BTC_DATA;
+      const dates = BM.monthStarts("2018-01-01", "2020-12-01");
+      const prices = Float64Array.from(dates, BM.closeOn);
+      const mult = Float64Array.from(prices, () => 1.5);
+      let threw = false;
+      try {
+        BM.simulateLedger(prices, mult, 500, { debug: true, startingBalance: 1000 });
+      } catch (e) {
+        threw = true;
+      }
+      assert(!threw, "debug assertion false-positived on a conserving ledger");
+    });
+
+    // 10. Ceiling >= DCA >= floor for any real price series: the clairvoyant
+    // best-case can never do worse than DCA, and the worst-case can never do
+    // better, because DCA is one particular (non-adaptive) allocation and
+    // ceiling/floor are the extremes over ALL allocations under the same
+    // deposit-can-only-be-spent-later constraint.
+    check("10. Perfect-timing ceiling/floor bracket DCA", (assert) => {
+      const dates = BM.monthStarts("2018-01-01", "2022-12-01");
+      const prices = Float64Array.from(dates, BM.closeOn);
+      const ones = new Float64Array(prices.length).fill(1);
+      const dca = BM.simulateLedger(prices, ones, 500);
+      const ceiling = BM.perfectTiming(prices, 500, "best");
+      const floor = BM.perfectTiming(prices, 500, "worst");
+      assert(ceiling.btc >= dca.btc - 1e-9, `ceiling ${ceiling.btc} should be >= DCA ${dca.btc}`);
+      assert(dca.btc >= floor.btc - 1e-9, `DCA ${dca.btc} should be >= floor ${floor.btc}`);
+    });
+
+    // 11. Permutation test degenerate case: shuffling a constant multiplier
+    // array changes nothing, so every shuffled replicate ties the observed
+    // result exactly. That means the "real" ordering never beats a shuffled
+    // one — the correct, honest p-value is 1 (no significance whatsoever),
+    // which is exactly right: a constant multiplier carries no timing
+    // information for the test to detect.
+    check("11. Permutation test reports no significance for a constant (untimed) strategy", (assert) => {
+      const dates = BM.monthStarts("2018-01-01", "2020-12-01");
+      const prices = Float64Array.from(dates, BM.closeOn);
+      const ones = new Float64Array(prices.length).fill(1);
+      const perm = BM.permutationTest(prices, ones, 500, 500, BM.mulberry32(7));
+      assert(perm.pValue === 1, `expected p=1 for an unshuffleable series, got ${perm.pValue}`);
+      assert(perm.nullSd < 1e-9, `expected a near-zero-spread null distribution, got sd=${perm.nullSd}`);
+    });
+
+    // 12. calibrationConstant at exponent 0 is always 1, matching the same
+    // "p=0 behaves like DCA regardless of everything else" identity checked
+    // for the main ledger in test 3.
+    check("12. calibrationConstant(exponent=0) is always 1", (assert) => {
+      const fair = [100, 200, 50, 9999];
+      const prices = [10, 20, 5, 1];
+      const k = BM.calibrationConstant(fair, prices, 0, []);
+      assert(k === 1, `expected k=1 for exponent 0, got ${k}`);
+    });
+
+    // 13. Rolling-window study refuses a period shorter than the window
+    // instead of silently producing NaN summary statistics.
+    check("13. rollingWindowStudy rejects a too-short period", (assert) => {
+      let threw = false;
+      let message = "";
+      try {
+        R.rollingWindowStudy({
+          windowMonths: 48,
+          deposit: 500,
+          fitMode: "full",
+          calibrate: false,
+          strategies: [{ name: "Linear", exponent: 1, mMin: 0, mMax: 3 }],
+          dataStart: "2020-01-01",
+          dataEnd: "2021-06-01",
+        });
+      } catch (e) {
+        threw = true;
+        message = e.message;
+      }
+      assert(threw, "expected rollingWindowStudy to throw for a too-short period");
+      assert(/shorter than the rolling window/.test(message), `unexpected error message: ${message}`);
+    });
+
+    // 14. DataCheck.checkAnchors: an exact in-range match passes, and a date
+    // beyond the committed series is reported as such rather than crashing
+    // or silently comparing against undefined.
+    check("14. DataCheck anchors: in-range match passes, out-of-range date reports so", (assert) => {
+      const closes = new Array(10).fill(1);
+      closes[6] = 126200; // startDate + 6 days = 2025-10-07, exact match to the ATH anchor
+      const data = { startDate: "2025-10-01", closes };
+      const results = global.DataCheck.checkAnchors(data);
+      assert(results[0].pass === true, `expected the in-range anchor to pass, devPct=${results[0].devPct}`);
+      assert(
+        results[1].pass === false && results[1].local === null,
+        "expected the out-of-range anchor to report null/fail rather than compare against undefined"
+      );
+    });
+
+    // 15. shapeDiagnostics computes a real kurtosis, not a fixed number: an
+    // i.i.d.-Gaussian synthetic series should land near 3 (the diagnostic's
+    // own "this looks synthetic" threshold), well below the ~24 the real
+    // committed BTC series shows.
+    check("15. shapeDiagnostics distinguishes near-normal synthetic data from fat tails", (assert) => {
+      const rand = mulberry32(99);
+      const n = 2000;
+      const closes = [1000];
+      for (let i = 1; i < n; i++) closes.push(closes[i - 1] * Math.exp(0.001 * gaussian(rand)));
+      const shape = global.DataCheck.shapeDiagnostics({ startDate: "2015-01-01", closes });
+      assert(shape.kurtosis < 6, `expected near-normal kurtosis (~3) for i.i.d. Gaussian returns, got ${shape.kurtosis}`);
     });
 
     return results;

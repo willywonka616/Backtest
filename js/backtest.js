@@ -162,20 +162,26 @@
     return n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
   }
 
-  // Runs the per-month ledger loop for one strategy.
-  // params: { p, mMin, mMax, deposit, startingBalance }
-  // Returns { trace, kMin, kMax }.
-  function runLedger(data, context, params, calibrationOn) {
-    const { p, mMin, mMax, deposit, startingBalance } = params;
+  // Computes the per-month multiplier decision for one strategy: the price,
+  // power-law fair value, raw ratio, calibration k, and clamped multiplier
+  // at every purchase date. Split out from runLedger so the actual money
+  // arithmetic (spend/balance/btc) has exactly one implementation, shared
+  // with the benchmark suite and the rolling-window study — see
+  // Benchmarks.simulateLedger in js/benchmarks.js.
+  function computeMultiplierSeries(data, context, params, calibrationOn) {
+    const { p, mMin, mMax } = params;
     const { kMap, kMin, kMax } = computeKMap(data, context, p, calibrationOn);
 
-    let balance = startingBalance || 0;
-    let btc = 0;
-    const trace = [];
+    const n = context.purchaseDates.length;
+    const prices = new Float64Array(n);
+    const priceDatesUsed = new Array(n);
+    const plFairArr = new Float64Array(n);
+    const mRawArr = new Float64Array(n);
+    const kArr = new Float64Array(n);
+    const multipliers = new Float64Array(n);
 
-    for (const t of context.purchaseDates) {
-      balance += deposit;
-
+    for (let i = 0; i < n; i++) {
+      const t = context.purchaseDates[i];
       const priceInfo = closeOn(data, t);
       if (!priceInfo) throw new Error(`No price data available on or after ${t}`);
       const price = priceInfo.price;
@@ -187,31 +193,44 @@
       const mRaw = p === 0 ? 1 : Math.pow(plFair / price, p);
       const k = kMap.get(yearOf(t));
       const m = clamp(k * mRaw, mMin, mMax);
-      const desired = deposit * m;
-      const spend = Math.min(desired, balance);
-      const starved = spend < desired - 0.005;
 
-      btc += spend / price;
-      balance -= spend;
-
-      trace.push({
-        date: t,
-        priceDateUsed: priceInfo.dateUsed,
-        price,
-        plFair,
-        mRaw,
-        k,
-        m,
-        desired,
-        spend,
-        balance,
-        btc,
-        portfolioValue: btc * price + balance,
-        starved,
-      });
+      prices[i] = price;
+      priceDatesUsed[i] = priceInfo.dateUsed;
+      plFairArr[i] = plFair;
+      mRawArr[i] = mRaw;
+      kArr[i] = k;
+      multipliers[i] = m;
     }
 
-    return { trace, kMin, kMax };
+    return { prices, priceDatesUsed, plFairArr, mRawArr, kArr, multipliers, kMin, kMax };
+  }
+
+  // Runs the per-month ledger loop for one strategy.
+  // params: { p, mMin, mMax, deposit, startingBalance }
+  // Returns { trace, kMin, kMax }.
+  function runLedger(data, context, params, calibrationOn) {
+    const series = computeMultiplierSeries(data, context, params, calibrationOn);
+    const result = global.Benchmarks.simulateLedger(series.prices, series.multipliers, params.deposit, {
+      startingBalance: params.startingBalance || 0,
+    });
+
+    const trace = context.purchaseDates.map((t, i) => ({
+      date: t,
+      priceDateUsed: series.priceDatesUsed[i],
+      price: series.prices[i],
+      plFair: series.plFairArr[i],
+      mRaw: series.mRawArr[i],
+      k: series.kArr[i],
+      m: series.multipliers[i],
+      desired: params.deposit * series.multipliers[i],
+      spend: result.spendTrace[i],
+      balance: result.balanceTrace[i],
+      btc: result.btcTrace[i],
+      portfolioValue: result.btcTrace[i] * series.prices[i] + result.balanceTrace[i],
+      starved: result.starvedTrace[i] === 1,
+    }));
+
+    return { trace, kMin: series.kMin, kMax: series.kMax };
   }
 
   // ---- Metrics ----------------------------------------------------------

@@ -742,6 +742,354 @@
   }
 
   // ---------------------------------------------------------------------
+  // Panel A: data verification
+  // ---------------------------------------------------------------------
+
+  const BACKTEST_CONTROL_IDS = [
+    "startDate",
+    "endDate",
+    "fitMode",
+    "calibration",
+    "depositDca",
+    "depositLinear",
+    "depositSquared",
+    "mMinLinear",
+    "mMaxLinear",
+    "mMinSquared",
+    "mMaxSquared",
+    "resetBtn",
+    "runOptimizerBtn",
+    "runBenchmarkBtn",
+    "runRollingBtn",
+  ];
+
+  function disableBacktestControls(message) {
+    BACKTEST_CONTROL_IDS.forEach((id) => {
+      const target = el(id);
+      if (target) target.disabled = true;
+    });
+    showDataError(message);
+  }
+
+  function setVerifyStrip(className, text) {
+    const strip = el("verifyStrip");
+    strip.className = "verify-strip " + className;
+    strip.textContent = text;
+  }
+
+  function renderAnchorTable(anchors) {
+    let html = "<thead><tr><th>Date</th><th>Note</th><th>Expected</th><th>Found</th><th>Deviation</th><th>Result</th></tr></thead><tbody>";
+    for (const a of anchors) {
+      const resultCell = a.pass
+        ? '<span style="color:var(--green)">PASS</span>'
+        : `<span style="color:var(--red)">${a.detail || "FAIL"}</span>`;
+      html += `<tr>
+        <td>${formatDMY(a.date)}</td>
+        <td>${a.note}</td>
+        <td>${fmtUsd(a.price)}</td>
+        <td>${a.local == null ? "—" : fmtUsd(a.local)}</td>
+        <td>${a.devPct == null ? "—" : fmtNum(a.devPct, 2) + "%"}</td>
+        <td>${resultCell}</td>
+      </tr>`;
+    }
+    html += "</tbody>";
+    el("anchorTable").innerHTML = html;
+  }
+
+  function renderShapeTable(shape) {
+    const rows = [
+      ["Annualised volatility", fmtNum(shape.annualVol, 1) + "%", "roughly 45–75% in recent years; the full 2010– history runs higher"],
+      ["Share of days moving >5%", fmtNum(shape.bigMovePct, 1) + "%", "roughly 3–5% in recent years"],
+      ["Kurtosis", fmtNum(shape.kurtosis, 1), "well above 3; near 3 suggests a normal-distributed (synthetic) series"],
+      ["Repeated closes", fmtNum(shape.repeatedClosePct, 2) + "%", "near 0% for real daily data; high values suggest padding"],
+      ["Last date in file", formatDMY(shape.lastDate), "—"],
+      ["Last close in file", fmtUsd(shape.lastClose), "—"],
+    ];
+    let html = "<thead><tr><th>Metric</th><th>Value</th><th>Expected range</th></tr></thead><tbody>";
+    for (const [label, val, exp] of rows) html += `<tr><td>${label}</td><td>${val}</td><td>${exp}</td></tr>`;
+    html += "</tbody>";
+    el("shapeTable").innerHTML = html;
+  }
+
+  let verifyChartInstance = null;
+  function renderVerifyOverlayChart(series) {
+    verifyChartInstance = destroyIfExists(verifyChartInstance);
+    const dates = series.map((r) => r.date);
+    const committed = series.map((r) => r.local);
+    const live = series.map((r) => r.live);
+    verifyChartInstance = Charts.createTimeSeriesChart(
+      el("verifyOverlayChart"),
+      dates,
+      [
+        { label: "Committed", color: COLOR.dca, values: committed },
+        { label: "Live", color: COLOR.linear, values: live },
+      ],
+      { height: 200, yFormat: (v) => "$" + fmtNum(v, 0) }
+    );
+    el("verifyOverlayHint").hidden = false;
+  }
+
+  async function runDataVerification() {
+    const anchors = DataCheck.checkAnchors(DATA);
+    const shape = DataCheck.shapeDiagnostics(DATA);
+    renderAnchorTable(anchors);
+    renderShapeTable(shape);
+
+    setVerifyStrip("unverified", "Checking committed data against a live source…");
+
+    let live = null;
+    let liveError = null;
+    try {
+      live = await DataCheck.verifyAgainstLive(DATA);
+    } catch (err) {
+      liveError = err;
+    }
+
+    if (liveError) {
+      setVerifyStrip(
+        "unverified",
+        `Live check unavailable (${liveError.message}) — expected under file:// due to CORS. Anchor and shape checks above still apply.`
+      );
+      return;
+    }
+
+    const overlapNote = live.overlapDays ? ` · ${live.overlapDays}d overlap` : "";
+    const medianNote = live.medianAbsPct != null ? ` · median Δ ${fmtNum(live.medianAbsPct, 2)}%` : "";
+    if (live.verdict.startsWith("PASS")) {
+      setVerifyStrip("pass", live.verdict + overlapNote + medianNote);
+    } else if (live.verdict.startsWith("FAIL")) {
+      setVerifyStrip("fail", live.verdict + overlapNote + medianNote);
+      disableBacktestControls(
+        "Data verification failed: the committed price series does not match a live source. Backtest controls are disabled until this is resolved."
+      );
+    } else {
+      // SUSPECT or NO OVERLAP — a caution, not a hard failure.
+      setVerifyStrip("suspect", live.verdict + overlapNote + medianNote);
+    }
+
+    if (live.series && live.series.length) {
+      renderVerifyOverlayChart(live.series);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Panel B: benchmarks (ceiling, floor, permutation significance)
+  // ---------------------------------------------------------------------
+
+  let allocationChartHandle = null;
+
+  function currentBenchmarkStrategy() {
+    const key = el("benchmarkStrategy").value === "2" ? "squared" : "linear";
+    return {
+      key,
+      name: key === "linear" ? "2 · Power-law linear" : "3 · Power-law squared",
+      exponent: key === "linear" ? 1 : 2,
+      mMin: state.bounds[key].mMin,
+      mMax: state.bounds[key].mMax,
+      deposit: state.deposit[key],
+    };
+  }
+
+  function runBenchmarks() {
+    if (!validateDates()) return;
+    readNumericControls();
+    const strat = currentBenchmarkStrategy();
+
+    const cfg = {
+      startDate: state.startDate,
+      endDate: state.endDate,
+      deposit: strat.deposit,
+      fitMode: state.fitMode,
+      calibrate: state.calibration,
+      strategies: [{ name: strat.name, exponent: strat.exponent, mMin: strat.mMin, mMax: strat.mMax }],
+    };
+
+    let suite;
+    try {
+      suite = Benchmarks.runBenchmarkSuite(cfg);
+    } catch (err) {
+      showDataError("Benchmark failed: " + err.message);
+      return;
+    }
+    clearDataError();
+    el("benchmarkResults").hidden = false;
+    renderBenchmarkHeadline(suite, strat);
+    renderAllocationChart(suite, strat);
+    renderPermutationChart(suite);
+  }
+
+  function renderBenchmarkHeadline(suite, strat) {
+    const r = suite.results[0];
+    const sign = (v) => (v >= 0 ? "+" : "");
+    const html = `
+      <div class="headline-item ceiling">
+        <div class="label">Maximum possible edge over DCA</div>
+        <div class="value">${sign(suite.maxPossibleEdgePct)}${fmtNum(suite.maxPossibleEdgePct, 1)}%</div>
+        <div class="sub">perfect foresight</div>
+      </div>
+      <div class="headline-item best">
+        <div class="label">${strat.name}</div>
+        <div class="value">${sign(r.deltaVsDcaPct)}${fmtNum(r.deltaVsDcaPct, 1)}%</div>
+        <div class="sub">${r.capture == null ? "no headroom to capture" : `captured ${fmtNum(r.capture * 100, 0)}% of it`}</div>
+      </div>
+      <div class="headline-item floor">
+        <div class="label">Worst possible timing</div>
+        <div class="value">${fmtNum(suite.minPossibleEdgePct, 1)}%</div>
+        <div class="sub">always buying the local top</div>
+      </div>
+    `;
+    el("benchmarkHeadline").innerHTML = html;
+  }
+
+  function renderAllocationChart(suite, strat) {
+    const r = suite.results[0];
+    allocationChartHandle = Charts.createAllocationChart(
+      el("allocationChart"),
+      suite.dates,
+      Array.from(suite.ceiling.spendAt),
+      Array.from(r.run.spendTrace),
+      Array.from(suite.prices),
+      { color: strat.key === "squared" ? COLOR.squared : COLOR.linear, height: 220 }
+    );
+  }
+
+  function renderPermutationChart(suite) {
+    const r = suite.results[0];
+    const perm = r.permutation;
+    const spread = perm.nullP95 - perm.nullP05;
+    const binWidth = spread > 0 ? spread / 30 : Math.max(perm.observedBtc * 0.02, 0.0001);
+    const bins = Rolling.histogram(Array.from(perm.nullBtc), binWidth);
+    Charts.createHistogramChart(el("permutationChart"), bins, perm.observedBtc, { xFormat: (v) => fmtBtc(v), height: 180 });
+    el("permutationCaption").textContent =
+      `The real chronological ordering beat ${fmtNum(perm.percentile, 1)}% of ${perm.nullBtc.length} shuffled orderings ` +
+      `of the same multipliers (p ≈ ${fmtNum(perm.pValue, 4)}). Orange marker is the observed result.`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Panel C: rolling windows
+  // ---------------------------------------------------------------------
+
+  let rollingDeltaChartInstance = null;
+
+  // Rolling windows always span as much history as is available, independent
+  // of whatever period is selected for the main backtest — the point is to
+  // see how the result varies across different historical regimes, which a
+  // single narrow window can't show.
+  function rollingDataBounds() {
+    const earliestFeasible = PL.addDays(DATA.startDate, B.MIN_POINTS);
+    return { dataStart: B.nextMonthStart(earliestFeasible), dataEnd: dataEndDate() };
+  }
+
+  function runRolling() {
+    readNumericControls();
+    const windowMonths = Number(el("rollingWindowMonths").value);
+    const { dataStart, dataEnd } = rollingDataBounds();
+
+    const cfg = {
+      windowMonths,
+      stepMonths: 1,
+      deposit: state.deposit.linear || 500,
+      fitMode: state.fitMode,
+      calibrate: state.calibration,
+      strategies: [
+        { name: "2 · Power-law linear", exponent: 1, mMin: state.bounds.linear.mMin, mMax: state.bounds.linear.mMax },
+        { name: "3 · Power-law squared", exponent: 2, mMin: state.bounds.squared.mMin, mMax: state.bounds.squared.mMax },
+      ],
+      dataStart,
+      dataEnd,
+    };
+
+    let study;
+    try {
+      study = Rolling.rollingWindowStudy(cfg);
+    } catch (err) {
+      showDataError("Rolling window study failed: " + err.message);
+      return;
+    }
+    clearDataError();
+    el("rollingResults").hidden = false;
+    renderRollingResults(study, cfg);
+  }
+
+  function binValuesInRange(values, lo, hi, binWidth) {
+    const bins = [];
+    for (let x = lo; x < hi; x += binWidth) bins.push({ x0: x, x1: x + binWidth, count: 0 });
+    if (bins.length === 0) bins.push({ x0: lo, x1: lo + binWidth, count: 0 });
+    for (const v of values) {
+      let i = Math.floor((v - lo) / binWidth);
+      if (i < 0) i = 0;
+      if (i >= bins.length) i = bins.length - 1;
+      bins[i].count++;
+    }
+    return bins;
+  }
+
+  function renderRollingResults(study, cfg) {
+    el("effectiveNNote").textContent =
+      `${study.windows.length} overlapping ${cfg.windowMonths}-month windows over ${cfg.dataStart} – ${cfg.dataEnd}, ` +
+      `but consecutive windows share almost all their months — only about ${study.effectiveN} are genuinely independent ` +
+      `(${study.nonOverlapping.length} non-overlapping windows shown alongside the full set below).`;
+
+    const dates = study.windows.map((w) => w.startDate);
+    const series = cfg.strategies.map((s, i) => ({
+      label: s.name,
+      color: i === 0 ? COLOR.linear : COLOR.squared,
+      values: study.windows.map((w) => w.strategies[i].deltaBtcPct),
+    }));
+    rollingDeltaChartInstance = destroyIfExists(rollingDeltaChartInstance);
+    rollingDeltaChartInstance = Charts.createTimeSeriesChart(el("deltaVsStartChart"), dates, series, {
+      yFormat: (v) => fmtNum(v, 1) + "%",
+      hLines: [{ value: 0, label: "0%" }],
+    });
+
+    const allDeltas = study.byStrategy.flatMap((s) => s.deltas);
+    const lo = Math.min(...allDeltas);
+    const hi = Math.max(...allDeltas);
+    const binWidth = (hi - lo) / 20 || 0.5;
+    const histContainer = el("rollingHistograms");
+    histContainer.innerHTML = "";
+    // Append every card (and let the CSS grid settle into its final column
+    // count) before measuring any chartDiv's width — measuring inside the
+    // same loop that's still populating the grid sizes each earlier chart to
+    // however many columns existed at that moment, not the final layout.
+    const chartDivs = study.byStrategy.map((s, i) => {
+      const card = document.createElement("div");
+      card.className = "rolling-hist-card";
+      const heading = document.createElement("h4");
+      heading.style.color = i === 0 ? COLOR.linear : COLOR.squared;
+      heading.textContent = s.name;
+      const chartDiv = document.createElement("div");
+      card.appendChild(heading);
+      card.appendChild(chartDiv);
+      histContainer.appendChild(card);
+      return chartDiv;
+    });
+    study.byStrategy.forEach((s, i) => {
+      const bins = binValuesInRange(s.deltas, lo, hi, binWidth);
+      Charts.createHistogramChart(chartDivs[i], bins, s.mean, { xFormat: (v) => fmtNum(v, 1) + "%", height: 150 });
+    });
+
+    let html =
+      "<thead><tr><th>Strategy</th><th>n</th><th>Mean</th><th>Median</th><th>SD</th><th>Min</th><th>p05</th><th>p95</th><th>Max</th><th>Win rate</th></tr></thead><tbody>";
+    for (const s of study.byStrategy) {
+      html += `<tr>
+        <td>${s.name}</td>
+        <td>${s.n}</td>
+        <td>${fmtNum(s.mean, 2)}%</td>
+        <td>${fmtNum(s.median, 2)}%</td>
+        <td>${fmtNum(s.sd, 2)}%</td>
+        <td>${fmtNum(s.min, 2)}%</td>
+        <td>${fmtNum(s.p05, 2)}%</td>
+        <td>${fmtNum(s.p95, 2)}%</td>
+        <td>${fmtNum(s.max, 2)}%</td>
+        <td>${fmtNum(s.winRate, 1)}%</td>
+      </tr>`;
+    }
+    html += "</tbody>";
+    el("rollingSummaryTable").innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------------
   // Event wiring
   // ---------------------------------------------------------------------
 
@@ -804,6 +1152,8 @@
     });
 
     el("runOptimizerBtn").addEventListener("click", runOptimizer);
+    el("runBenchmarkBtn").addEventListener("click", runBenchmarks);
+    el("runRollingBtn").addEventListener("click", runRolling);
 
     el("downloadCsvBtn").addEventListener("click", () => {
       if (!lastResults) return;
@@ -832,6 +1182,7 @@
     applyStateToControls();
     wireEvents();
     onControlsChanged();
+    runDataVerification();
   }
 
   if (document.readyState === "loading") {

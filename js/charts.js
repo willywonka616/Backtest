@@ -305,11 +305,122 @@
     return { canvas, byKey };
   }
 
+  // ---- Allocation chart (benchmarks panel) --------------------------------
+  //
+  // Grey bars: the clairvoyant ceiling allocation. Coloured bars: a
+  // strategy's actual monthly spend. Price line overlaid on its own log
+  // scale. Shows at a glance whether a strategy bought in roughly the right
+  // months and just not hard enough, or in the wrong months entirely.
+  function createAllocationChart(container, dates, ceilingSpend, strategySpend, prices, opts) {
+    opts = opts || {};
+    container.innerHTML = "";
+    const canvas = document.createElement("canvas");
+    const cssW = Math.max(320, container.clientWidth || 800);
+    const cssH = opts.height || 240;
+    const dpr = reducedMotion ? 1 : window.devicePixelRatio || 1;
+    canvas.width = cssW * dpr;
+    canvas.height = cssH * dpr;
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    container.appendChild(canvas);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+
+    const n = dates.length;
+    const cellW = cssW / n;
+    const maxSpend = Math.max(1, ...ceilingSpend, ...strategySpend);
+    const priceLogMin = Math.log(Math.min(...prices));
+    const priceLogMax = Math.log(Math.max(...prices));
+    const priceRange = priceLogMax - priceLogMin || 1;
+
+    for (let i = 0; i < n; i++) {
+      const x = i * cellW;
+      const barW = Math.max(1, cellW * 0.8);
+      const greyH = (ceilingSpend[i] / maxSpend) * cssH;
+      ctx.fillStyle = "rgba(230,230,230,0.18)";
+      ctx.fillRect(x + cellW * 0.1, cssH - greyH, barW, greyH);
+
+      const colorH = (strategySpend[i] / maxSpend) * cssH;
+      ctx.fillStyle = opts.color || COLORS.fair;
+      ctx.fillRect(x + cellW * 0.1 + barW * 0.25, cssH - colorH, barW * 0.5, colorH);
+    }
+
+    ctx.beginPath();
+    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.lineWidth = 1.25;
+    for (let i = 0; i < n; i++) {
+      const py = cssH - ((Math.log(prices[i]) - priceLogMin) / priceRange) * cssH;
+      const px = i * cellW + cellW / 2;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    return { canvas };
+  }
+
+  // ---- Histogram chart (permutation null / rolling-window deltas) --------
+  //
+  // Neutral bars for the distribution, an orange marker for the observed
+  // value — the marker is the point of the chart, the bars are context.
+  function createHistogramChart(container, bins, markerValue, opts) {
+    opts = opts || {};
+    container.innerHTML = "";
+    const canvas = document.createElement("canvas");
+    const marginBottom = 22;
+    const cssW = Math.max(240, container.clientWidth || 400);
+    const cssH = opts.height || 180;
+    const plotH = cssH - marginBottom;
+    const dpr = reducedMotion ? 1 : window.devicePixelRatio || 1;
+    canvas.width = cssW * dpr;
+    canvas.height = cssH * dpr;
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    container.appendChild(canvas);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+
+    if (bins.length === 0) return { canvas };
+    const maxCount = Math.max(1, ...bins.map((b) => b.count));
+    const lo = bins[0].x0;
+    const hi = bins[bins.length - 1].x1;
+    const range = hi - lo || 1;
+    const cellW = cssW / bins.length;
+
+    bins.forEach((b, i) => {
+      const h = (b.count / maxCount) * plotH;
+      ctx.fillStyle = "rgba(122,139,166,0.55)";
+      ctx.fillRect(i * cellW + 1, plotH - h, Math.max(1, cellW - 2), h);
+    });
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText((opts.xFormat || String)(lo), 0, plotH + 4);
+    ctx.textAlign = "right";
+    ctx.fillText((opts.xFormat || String)(hi), cssW, plotH + 4);
+
+    if (markerValue != null && markerValue >= lo && markerValue <= hi) {
+      const mx = ((markerValue - lo) / range) * cssW;
+      ctx.beginPath();
+      ctx.strokeStyle = COLORS.fair;
+      ctx.lineWidth = 2;
+      ctx.moveTo(mx, 0);
+      ctx.lineTo(mx, plotH);
+      ctx.stroke();
+    }
+
+    return { canvas };
+  }
+
   global.Charts = {
     createPriceChart,
     setPriceChartSelection,
     createTimeSeriesChart,
     createHeatmap,
+    createAllocationChart,
+    createHistogramChart,
     tsSeconds,
     COLORS,
   };
