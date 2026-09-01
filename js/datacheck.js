@@ -131,5 +131,64 @@
     };
   }
 
-  global.DataCheck = { verifyAgainstLive, checkAnchors, shapeDiagnostics, ANCHORS };
+  // Finds the actual all-time-high in the committed series: the single most
+  // diagnostic check available offline — a fabricated or forward-filled
+  // series almost never places its peak on the right date at the right
+  // level (see ANCHORS' "all-time high" entry, which this is compared
+  // against by the caller).
+  function findATH(data) {
+    data = data || global.BTC_DATA;
+    const start = new Date(data.startDate + "T00:00:00Z");
+    let bestIdx = 0;
+    let bestPrice = -Infinity;
+    for (let i = 0; i < data.closes.length; i++) {
+      const c = data.closes[i];
+      if (c != null && c > bestPrice) {
+        bestPrice = c;
+        bestIdx = i;
+      }
+    }
+    const date = new Date(start.getTime() + bestIdx * 86400000).toISOString().slice(0, 10);
+    return { price: bestPrice, date };
+  }
+
+  // Cheap, offline structural health of the committed series: how many
+  // calendar days had to be forward-filled at generation time (see
+  // tools/fetch-data.mjs — BTC_DATA.fillCount, 0 if the field predates this
+  // check or the source was already contiguous), and how many closes are
+  // missing or non-positive (a zero/negative price is never real market
+  // data, whatever the source).
+  function dataHealth(data) {
+    data = data || global.BTC_DATA;
+    const c = data.closes;
+    let zeroOrNegativeCount = 0;
+    for (const price of c) {
+      if (price == null || price <= 0) zeroOrNegativeCount++;
+    }
+    const lastDate = new Date(
+      new Date(data.startDate + "T00:00:00Z").getTime() + (c.length - 1) * 86400000
+    )
+      .toISOString()
+      .slice(0, 10);
+    return {
+      rows: c.length,
+      lastDate,
+      lastClose: c[c.length - 1],
+      gapDays: data.fillCount || 0,
+      zeroOrNegativeCount,
+    };
+  }
+
+  // Days between the series' last date and `now` (defaults to the real
+  // wall-clock time). A committed snapshot more than a few days stale means
+  // every chart and metric on the page is describing a market that has
+  // since moved on.
+  function staleDays(lastDateStr, now) {
+    now = now || new Date();
+    const last = new Date(lastDateStr + "T00:00:00Z");
+    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    return Math.round((today.getTime() - last.getTime()) / 86400000);
+  }
+
+  global.DataCheck = { verifyAgainstLive, checkAnchors, shapeDiagnostics, findATH, dataHealth, staleDays, ANCHORS };
 })(typeof window !== "undefined" ? window : globalThis);

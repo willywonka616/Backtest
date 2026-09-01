@@ -419,6 +419,49 @@
       );
     });
 
+    // 21. findATH locates the actual maximum close and its date, not just
+    // the final value — built on a synthetic series with a known interior
+    // peak so the expected answer isn't the trivially-last point.
+    check("21. DataCheck.findATH finds the true maximum, not the last value", (assert) => {
+      const closes = [100, 200, 500, 300, 400]; // peak at index 2
+      const data = { startDate: "2020-01-01", closes };
+      const ath = global.DataCheck.findATH(data);
+      assert(approxEqual(ath.price, 500, 1e-9), `expected ATH price 500, got ${ath.price}`);
+      assert(ath.date === "2020-01-03", `expected ATH date 2020-01-03 (index 2), got ${ath.date}`);
+    });
+
+    // 22. dataHealth: zero/negative closes are counted, and gapDays comes
+    // straight from the committed fillCount field (0 when absent, for
+    // series generated before that field existed).
+    check("22. DataCheck.dataHealth counts zero/negative closes and reads fillCount", (assert) => {
+      const withBadCloses = { startDate: "2020-01-01", closes: [100, 0, -5, 200], fillCount: 3 };
+      const health = global.DataCheck.dataHealth(withBadCloses);
+      assert(health.zeroOrNegativeCount === 2, `expected 2 zero/negative closes, got ${health.zeroOrNegativeCount}`);
+      assert(health.gapDays === 3, `expected gapDays to read fillCount (3), got ${health.gapDays}`);
+      assert(health.rows === 4, `expected rows 4, got ${health.rows}`);
+
+      const noFillCount = { startDate: "2020-01-01", closes: [100, 200] };
+      assert(global.DataCheck.dataHealth(noFillCount).gapDays === 0, "expected gapDays to default to 0 when fillCount is absent");
+    });
+
+    // 23. staleDays: a committed series more than a few days behind the
+    // wall clock is exactly what "DATA FAILED — N days stale" is meant to
+    // catch — check both a stale and a fresh reference date against the
+    // same last date.
+    check("23. DataCheck.staleDays measures days between last date and now", (assert) => {
+      const lastDate = "2026-05-23";
+      const staleNow = new Date("2026-09-01T00:00:00Z");
+      const freshNow = new Date("2026-05-24T12:00:00Z");
+      assert(
+        global.DataCheck.staleDays(lastDate, staleNow) === 101,
+        `expected 101 stale days, got ${global.DataCheck.staleDays(lastDate, staleNow)}`
+      );
+      assert(
+        global.DataCheck.staleDays(lastDate, freshNow) === 1,
+        `expected 1 stale day, got ${global.DataCheck.staleDays(lastDate, freshNow)}`
+      );
+    });
+
     return results;
   }
 

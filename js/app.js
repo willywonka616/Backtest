@@ -124,6 +124,13 @@
   let reserveChartInstance = null;
   let multiplierChartInstance = null;
 
+  // Populated by their respective run*() functions; consumed by the
+  // mobile copy-to-clipboard summaries and window.summary() so those never
+  // have to re-run anything, just format what's already on screen.
+  let lastDataCheckReport = null;
+  let lastBenchmarkRun = null; // { suite, strat }
+  let lastRollingRun = null; // { study, cfg }
+
   function encodeState() {
     try {
       return btoa(unescape(encodeURIComponent(JSON.stringify(state))));
@@ -452,47 +459,56 @@
     renderTraceTable();
   }
 
-  function metricRow(label, cells) {
-    return `<tr><td>${label}</td>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
+  // colLabels (one per cell, optional) becomes each cell's data-label — the
+  // column header shown when this row stacks into label/value lines below
+  // the 600px breakpoint (see index.html's table.results mobile CSS).
+  function metricRow(label, cells, colLabels) {
+    return `<tr><td>${label}</td>${cells
+      .map((c, i) => `<td${colLabels ? ` data-label="${colLabels[i]}"` : ""}>${c}</td>`)
+      .join("")}</tr>`;
   }
 
   function renderResultsTable() {
     const table = el("resultsTable");
     if (!lastResults) {
       table.innerHTML = "";
+      el("resultsHeadline").textContent = "Run the backtest to see results.";
       return;
     }
     const { strategies, committedMismatch } = lastResults;
 
     el("committedMismatchHint").hidden = !committedMismatch;
 
+    const colLabels = strategies.map((s) => s.label);
+    const row = (label, cells) => metricRow(label, cells, colLabels);
+
     let html = `<thead><tr><th>Metric</th>${strategies.map((s) => `<th style="color:${s.color}">${s.label}</th>`).join("")}</tr></thead><tbody>`;
 
-    html += metricRow("Total deposited", strategies.map((s) => fmtUsd(s.metrics.deposited)));
-    html += metricRow("Total committed (incl. starting capital)", strategies.map((s) => fmtUsd(s.metrics.totalCommitted)));
-    html += metricRow("Total invested", strategies.map((s) => fmtUsd(s.metrics.invested)));
-    html += metricRow("Deployment rate", strategies.map((s) => fmtPct(s.metrics.deploymentRate)));
-    html += metricRow("Cash left", strategies.map((s) => fmtUsd(s.metrics.cashLeft)));
-    html += metricRow("BTC accumulated", strategies.map((s) => fmtBtc(s.metrics.btcAccumulated)));
-    html += metricRow("Average cost basis", strategies.map((s) => fmtUsd(s.metrics.avgCostBasis)));
-    html += metricRow("BTC value at end", strategies.map((s) => fmtUsd(s.metrics.btcValue)));
-    html += metricRow("Total value", strategies.map((s) => fmtUsd(s.metrics.totalValue)));
-    html += metricRow("MoIC (on invested)", strategies.map((s) => fmtX(s.metrics.moicOnInvested)));
-    html += metricRow("MoIC (on committed)", strategies.map((s) => fmtX(s.metrics.moicOnCommitted)));
-    html += metricRow("XIRR (incl. starting capital at t0)", strategies.map((s) => fmtPct(s.metrics.xirr)));
-    html += metricRow(
+    html += row("Total deposited", strategies.map((s) => fmtUsd(s.metrics.deposited)));
+    html += row("Total committed (incl. starting capital)", strategies.map((s) => fmtUsd(s.metrics.totalCommitted)));
+    html += row("Total invested", strategies.map((s) => fmtUsd(s.metrics.invested)));
+    html += row("Deployment rate", strategies.map((s) => fmtPct(s.metrics.deploymentRate)));
+    html += row("Cash left", strategies.map((s) => fmtUsd(s.metrics.cashLeft)));
+    html += row("BTC accumulated", strategies.map((s) => fmtBtc(s.metrics.btcAccumulated)));
+    html += row("Average cost basis", strategies.map((s) => fmtUsd(s.metrics.avgCostBasis)));
+    html += row("BTC value at end", strategies.map((s) => fmtUsd(s.metrics.btcValue)));
+    html += row("Total value", strategies.map((s) => fmtUsd(s.metrics.totalValue)));
+    html += row("MoIC (on invested)", strategies.map((s) => fmtX(s.metrics.moicOnInvested)));
+    html += row("MoIC (on committed)", strategies.map((s) => fmtX(s.metrics.moicOnCommitted)));
+    html += row("XIRR (incl. starting capital at t0)", strategies.map((s) => fmtPct(s.metrics.xirr)));
+    html += row(
       "Starved months",
       strategies.map((s) => `${s.metrics.starvedMonths} (${fmtPct(s.metrics.starvedMonthsPct, 1)})`)
     );
-    html += metricRow(
+    html += row(
       "Unmet demand",
       strategies.map((s) => `${fmtUsd(s.metrics.unmetDemand)} (${fmtPct(s.metrics.unmetDemandPct, 1)})`)
     );
-    html += metricRow("Reserve max", strategies.map((s) => fmtUsd(s.metrics.reserveMax)));
-    html += metricRow("Reserve mean", strategies.map((s) => fmtUsd(s.metrics.reserveMean)));
-    html += metricRow("Reserve months at zero", strategies.map((s) => String(s.metrics.reserveMonthsAtZero)));
+    html += row("Reserve max", strategies.map((s) => fmtUsd(s.metrics.reserveMax)));
+    html += row("Reserve mean", strategies.map((s) => fmtUsd(s.metrics.reserveMean)));
+    html += row("Reserve months at zero", strategies.map((s) => String(s.metrics.reserveMonthsAtZero)));
     if (state.calibration) {
-      html += metricRow(
+      html += row(
         "k used (range)",
         strategies.map((s) => (s.strategyType === "threshold" || s.p === 0 ? "n/a" : `${fmtNum(s.kMin, 3)} – ${fmtNum(s.kMax, 3)}`))
       );
@@ -502,17 +518,17 @@
     if (committedMismatch) {
       html += `<tr><td colspan="${strategies.length + 1}" style="color:var(--red); font-family:var(--sans); font-size:0.8rem;">Total committed capital differs between strategies (see row above) — deltas withheld, not shown as a comparison.</td></tr>`;
     } else {
-      html += metricRow(
+      html += row(
         "Δ BTC accumulated",
         strategies.map((s) => (s === lastResults.baseline ? "—" : fmtPct(s.comparison.deltaBtcPct)))
       );
-      html += metricRow(
+      html += row(
         "Δ total value",
         strategies.map((s) =>
           s === lastResults.baseline ? "—" : `${fmtUsd(s.comparison.deltaTotalValue)} (${fmtPct(s.comparison.deltaTotalValuePct)})`
         )
       );
-      html += metricRow(
+      html += row(
         "Δ XIRR",
         strategies.map((s) =>
           s === lastResults.baseline
@@ -526,6 +542,9 @@
 
     html += "</tbody>";
     table.innerHTML = html;
+
+    const best = strategies.reduce((a, b) => (b.metrics.xirr != null && (a.metrics.xirr == null || b.metrics.xirr > a.metrics.xirr) ? b : a));
+    el("resultsHeadline").textContent = `${strategies.length} strategies · best XIRR ${fmtPct(best.metrics.xirr)} (${best.label})`;
   }
 
   function computeFullSampleFit() {
@@ -873,12 +892,12 @@
       const cmp = B.compareToBaseline(c.metrics, result.baseline);
       html += `<tr>
         <td>${i + 1}</td>
-        <td>${fmtNum(c.mMin, 2)}</td>
-        <td>${fmtNum(c.mMax, 2)}</td>
-        <td>${formatObjective(c.objectiveValue, opts.objective)}</td>
-        <td>${fmtPct(cmp.deltaBtcPct)}</td>
-        <td>${fmtUsd(c.metrics.totalValue)}</td>
-        <td>${fmtPct(c.metrics.xirr)}</td>
+        <td data-label="mMin">${fmtNum(c.mMin, 2)}</td>
+        <td data-label="mMax">${fmtNum(c.mMax, 2)}</td>
+        <td data-label="${objectiveLabel(opts.objective)}">${formatObjective(c.objectiveValue, opts.objective)}</td>
+        <td data-label="Δ BTC vs DCA">${fmtPct(cmp.deltaBtcPct)}</td>
+        <td data-label="Total value">${fmtUsd(c.metrics.totalValue)}</td>
+        <td data-label="XIRR">${fmtPct(c.metrics.xirr)}</td>
       </tr>`;
     });
     html += "</tbody>";
@@ -961,12 +980,6 @@
     showDataError(message);
   }
 
-  function setVerifyStrip(className, text) {
-    const strip = el("verifyStrip");
-    strip.className = "verify-strip " + className;
-    strip.textContent = text;
-  }
-
   function renderAnchorTable(anchors) {
     let html = "<thead><tr><th>Date</th><th>Note</th><th>Expected</th><th>Found</th><th>Deviation</th><th>Result</th></tr></thead><tbody>";
     for (const a of anchors) {
@@ -975,11 +988,11 @@
         : `<span style="color:var(--red)">${a.detail || "FAIL"}</span>`;
       html += `<tr>
         <td>${formatDMY(a.date)}</td>
-        <td>${a.note}</td>
-        <td>${fmtUsd(a.price)}</td>
-        <td>${a.local == null ? "—" : fmtUsd(a.local)}</td>
-        <td>${a.devPct == null ? "—" : fmtNum(a.devPct, 2) + "%"}</td>
-        <td>${resultCell}</td>
+        <td data-label="Note">${a.note}</td>
+        <td data-label="Expected">${fmtUsd(a.price)}</td>
+        <td data-label="Found">${a.local == null ? "—" : fmtUsd(a.local)}</td>
+        <td data-label="Deviation">${a.devPct == null ? "—" : fmtNum(a.devPct, 2) + "%"}</td>
+        <td data-label="Result">${resultCell}</td>
       </tr>`;
     }
     html += "</tbody>";
@@ -996,7 +1009,9 @@
       ["Last close in file", fmtUsd(shape.lastClose), "—"],
     ];
     let html = "<thead><tr><th>Metric</th><th>Value</th><th>Expected range</th></tr></thead><tbody>";
-    for (const [label, val, exp] of rows) html += `<tr><td>${label}</td><td>${val}</td><td>${exp}</td></tr>`;
+    for (const [label, val, exp] of rows) {
+      html += `<tr><td>${label}</td><td data-label="Value">${val}</td><td data-label="Expected range">${exp}</td></tr>`;
+    }
     html += "</tbody>";
     el("shapeTable").innerHTML = html;
   }
@@ -1019,45 +1034,189 @@
     el("verifyOverlayHint").hidden = false;
   }
 
-  async function runDataVerification() {
-    const anchors = DataCheck.checkAnchors(DATA);
-    const shape = DataCheck.shapeDiagnostics(DATA);
-    renderAnchorTable(anchors);
-    renderShapeTable(shape);
+  // ---------------------------------------------------------------------
+  // Mobile-readable data-check report: one function computes every check
+  // (sync ones instantly, the live-source check once its fetch resolves),
+  // and both the on-page panel and the "DATA CHECK" copy-to-clipboard block
+  // render from the exact same report object — so the two can never drift
+  // apart or disagree about a run.
+  // ---------------------------------------------------------------------
 
-    setVerifyStrip("unverified", "Checking committed data against a live source…");
+  // Recent-window shape diagnostics, not full-history: BTC's 2010-13 years
+  // are far more volatile than anything since, so a full-history annualised
+  // vol/big-move-day check would flag every real snapshot as out of range
+  // (see the "roughly ... in recent years" caveats already on the raw
+  // shape table below). A trailing 2-year window is what the expected
+  // ranges below are actually calibrated against.
+  function recentShapeDiagnostics(data, days) {
+    days = days || 730;
+    const n = data.closes.length;
+    const start = Math.max(0, n - days);
+    const slice = {
+      startDate: PL.addDays(data.startDate, start),
+      closes: data.closes.slice(start),
+    };
+    return DataCheck.shapeDiagnostics(slice);
+  }
+
+  function computeAthCheck() {
+    const ath = DataCheck.findATH(DATA);
+    const anchor = DataCheck.ANCHORS.find((a) => a.note === "all-time high");
+    const devPct = anchor ? (100 * Math.abs(ath.price - anchor.price)) / anchor.price : null;
+    const pass = anchor ? devPct <= anchor.tolerancePct : null;
+    return { ath, anchor, devPct, pass };
+  }
+
+  // The hard, structural checks computable instantly with no network:
+  // these (plus the live-source check once it resolves) are what decide
+  // the verdict strip and whether backtest controls get disabled. Shape
+  // diagnostics (volatility/big-move-days/kurtosis/repeats) get their own
+  // chips below but stay advisory only — see recentShapeDiagnostics' note
+  // and the original design rationale in README.md.
+  function buildSyncDataCheck() {
+    const health = DataCheck.dataHealth(DATA);
+    const stale = DataCheck.staleDays(health.lastDate);
+    const shape = recentShapeDiagnostics(DATA);
+    return {
+      health,
+      stale,
+      freshnessPass: stale <= 3,
+      gapsPass: health.gapDays === 0,
+      zerosPass: health.zeroOrNegativeCount === 0,
+      athCheck: computeAthCheck(),
+      shape,
+      volPass: shape.annualVol >= 45 && shape.annualVol <= 75,
+      bigMovePass: shape.bigMovePct >= 3 && shape.bigMovePct <= 5,
+      kurtosisPass: shape.kurtosis > 5,
+      repeatsPass: shape.repeatedClosePct <= 1,
+      live: undefined, // undefined = still checking; null = unavailable; object = resolved
+    };
+  }
+
+  function hardFail(report) {
+    if (!report.freshnessPass) return `series ends ${formatDMY(report.health.lastDate)}, ${report.stale} days stale`;
+    if (!report.gapsPass) return `${report.health.gapDays} date gap${report.health.gapDays === 1 ? "" : "s"} in the committed series`;
+    if (!report.zerosPass) return `${report.health.zeroOrNegativeCount} zero/negative close(s) in the committed series`;
+    if (report.athCheck.pass === false) {
+      return `all-time high off by ${fmtNum(report.athCheck.devPct, 1)}% vs. the ${fmtUsd(report.athCheck.anchor.price)} anchor`;
+    }
+    if (report.live && report.live.overlapPass === false) {
+      return `live source mismatch, ${fmtNum(report.live.medianAbsPct, 1)}% median deviation`;
+    }
+    return null;
+  }
+
+  function renderVerdictStrip(report) {
+    const strip = el("verdictStrip");
+    const reason = hardFail(report);
+    let text;
+    let cls;
+    if (report.live === undefined) {
+      cls = "checking";
+      text = "Checking committed data…";
+    } else if (reason) {
+      cls = "fail";
+      text = `DATA FAILED — ${reason}`;
+    } else {
+      cls = "pass";
+      text = `DATA OK — ${fmtNum(report.health.rows, 0)} days, through ${formatDMY(report.health.lastDate)}`;
+    }
+    strip.className = "verdict-strip " + cls;
+    strip.textContent = text;
+    el("dataVerifyHeadline").textContent = text;
+    return { pass: report.live !== undefined && !reason, reason };
+  }
+
+  function numRow(label, value, opts) {
+    opts = opts || {};
+    const chip = opts.pass == null ? "" : `<span class="chip-dot ${opts.pass ? "pass" : "fail"}"></span>`;
+    const sub = opts.expected != null ? `<div class="num-sub">${chip}${opts.expected}</div>` : "";
+    return `<div class="num-row${opts.bold ? " ath" : ""}">
+      <div class="num-top"><span class="num-label">${label}</span><span class="num-value">${value}</span></div>
+      ${sub}
+    </div>`;
+  }
+
+  function renderNumbersBlock(report) {
+    const h = report.health;
+    const rows = [];
+    rows.push(
+      numRow("Last date", formatDMY(h.lastDate), { pass: report.freshnessPass, expected: `${report.stale}d stale · expect ≤3d` })
+    );
+    rows.push(numRow("Last close", fmtUsd(h.lastClose)));
+    rows.push(numRow("Rows", fmtNum(h.rows, 0)));
+    rows.push(numRow("Date gaps", fmtNum(h.gapDays, 0), { pass: report.gapsPass, expected: "expect 0" }));
+    rows.push(
+      numRow("Zero or negative closes", fmtNum(h.zeroOrNegativeCount, 0), { pass: report.zerosPass, expected: "expect 0" })
+    );
+    const ac = report.athCheck;
+    rows.push(
+      numRow("ATH found", `${fmtUsd(ac.ath.price)} on ${formatDMY(ac.ath.date)}`, {
+        pass: ac.pass,
+        expected: ac.anchor ? `expect ${fmtUsd(ac.anchor.price)} ±${ac.anchor.tolerancePct}%` : "",
+        bold: true,
+      })
+    );
+    if (report.live === undefined) {
+      rows.push(numRow("Live overlap match", "checking…"));
+    } else if (report.live === null) {
+      rows.push(numRow("Live overlap match", "unavailable", { expected: "network unreachable (expected under file://)" }));
+    } else {
+      rows.push(
+        numRow("Live overlap match", `${fmtNum(report.live.medianAbsPct, 1)}% median dev`, {
+          pass: report.live.overlapPass,
+          expected: "expect ≤2%",
+        })
+      );
+    }
+    rows.push(numRow("Annual volatility", fmtNum(report.shape.annualVol, 1) + "%", { pass: report.volPass, expected: "expect 45–75% (2y)" }));
+    rows.push(numRow("Days moving >5%", fmtNum(report.shape.bigMovePct, 1) + "%", { pass: report.bigMovePass, expected: "expect 3–5% (2y)" }));
+    rows.push(numRow("Kurtosis", fmtNum(report.shape.kurtosis, 1), { pass: report.kurtosisPass, expected: "expect >5" }));
+    rows.push(numRow("Repeated closes", fmtNum(report.shape.repeatedClosePct, 1) + "%", { pass: report.repeatsPass, expected: "expect ≤1%" }));
+    el("numbersBlock").innerHTML = rows.join("");
+  }
+
+  function renderDataCheckPanel() {
+    renderVerdictStrip(lastDataCheckReport);
+    renderNumbersBlock(lastDataCheckReport);
+  }
+
+  function applyDataCheckVerdict() {
+    const reason = hardFail(lastDataCheckReport);
+    if (reason) {
+      disableBacktestControls(`Data verification failed: ${reason}. Backtest controls are disabled until this is resolved.`);
+    }
+    return reason;
+  }
+
+  async function runDataVerification() {
+    lastDataCheckReport = buildSyncDataCheck();
+    renderDataCheckPanel();
+
+    const anchors = DataCheck.checkAnchors(DATA);
+    renderAnchorTable(anchors);
+    renderShapeTable(DataCheck.shapeDiagnostics(DATA));
+
+    console.log(buildDataSummaryText());
+
+    // Sync checks (freshness/gaps/zeros/ATH) already fully decide the
+    // verdict on their own — disable immediately rather than waiting on a
+    // network round trip that may be slow or (under file://) never resolve.
+    applyDataCheckVerdict();
 
     let live = null;
-    let liveError = null;
     try {
-      live = await DataCheck.verifyAgainstLive(DATA);
+      const raw = await DataCheck.verifyAgainstLive(DATA);
+      live = { ...raw, overlapPass: raw.medianAbsPct != null ? raw.medianAbsPct <= 2 : null };
     } catch (err) {
-      liveError = err;
+      live = null; // unavailable (no network / CORS under file://) — not a failure
     }
+    lastDataCheckReport.live = live;
+    renderDataCheckPanel();
+    console.log(buildDataSummaryText());
+    applyDataCheckVerdict();
 
-    if (liveError) {
-      setVerifyStrip(
-        "unverified",
-        `Live check unavailable (${liveError.message}) — expected under file:// due to CORS. Anchor and shape checks above still apply.`
-      );
-      return;
-    }
-
-    const overlapNote = live.overlapDays ? ` · ${live.overlapDays}d overlap` : "";
-    const medianNote = live.medianAbsPct != null ? ` · median Δ ${fmtNum(live.medianAbsPct, 2)}%` : "";
-    if (live.verdict.startsWith("PASS")) {
-      setVerifyStrip("pass", live.verdict + overlapNote + medianNote);
-    } else if (live.verdict.startsWith("FAIL")) {
-      setVerifyStrip("fail", live.verdict + overlapNote + medianNote);
-      disableBacktestControls(
-        "Data verification failed: the committed price series does not match a live source. Backtest controls are disabled until this is resolved."
-      );
-    } else {
-      // SUSPECT or NO OVERLAP — a caution, not a hard failure.
-      setVerifyStrip("suspect", live.verdict + overlapNote + medianNote);
-    }
-
-    if (live.series && live.series.length) {
+    if (live && live.series && live.series.length) {
       renderVerifyOverlayChart(live.series);
     }
   }
@@ -1149,6 +1308,9 @@
     renderAllocationChart(suite, strat);
     renderPermutationChart(suite);
     renderDiagnosticsTable(suite);
+    lastBenchmarkRun = { suite, strat };
+    const r = suite.results[0];
+    el("benchmarksHeadline").textContent = `${strat.name}: ${r.deltaVsDcaPct >= 0 ? "+" : ""}${fmtNum(r.deltaVsDcaPct, 1)}% vs. DCA · p ${fmtNum(r.permutation.pValue, 3)}`;
   }
 
   function renderBenchmarkHeadline(suite, strat) {
@@ -1213,7 +1375,9 @@
       ["BTC accumulated", fmtBtc(perm.observedBtc), fmtBtc(perm.nullMean)],
     ];
     let html = "<thead><tr><th>Metric</th><th>Real (chronological)</th><th>Shuffled (mean of nulls)</th></tr></thead><tbody>";
-    for (const [label, real, shuf] of rows) html += `<tr><td>${label}</td><td>${real}</td><td>${shuf}</td></tr>`;
+    for (const [label, real, shuf] of rows) {
+      html += `<tr><td>${label}</td><td data-label="Real">${real}</td><td data-label="Shuffled">${shuf}</td></tr>`;
+    }
     html += "</tbody>";
     el("diagnosticsTable").innerHTML = html;
 
@@ -1276,10 +1440,10 @@
     for (const r of rows) {
       html += `<tr>
         <td>${fmtNum(r.targetDeployment, 2)}</td>
-        <td>${fmtNum(r.pValue, 4)}</td>
-        <td>${fmtBtc(r.observedBtc)}</td>
-        <td>${r.deltaBtcPct == null ? "—" : fmtNum(r.deltaBtcPct, 1) + "%"}</td>
-        <td>${fmtBtc(r.nullMean)}</td>
+        <td data-label="p-value">${fmtNum(r.pValue, 4)}</td>
+        <td data-label="BTC accumulated">${fmtBtc(r.observedBtc)}</td>
+        <td data-label="Δ BTC vs. td=1.0">${r.deltaBtcPct == null ? "—" : fmtNum(r.deltaBtcPct, 1) + "%"}</td>
+        <td data-label="Null mean BTC">${fmtBtc(r.nullMean)}</td>
       </tr>`;
     }
     html += "</tbody>";
@@ -1407,6 +1571,7 @@
     clearDataError();
     el("rollingResults").hidden = false;
     renderRollingResults(study, cfg);
+    lastRollingRun = { study, cfg };
   }
 
   function binValuesInRange(values, lo, hi, binWidth) {
@@ -1472,19 +1637,208 @@
     for (const s of study.byStrategy) {
       html += `<tr>
         <td>${s.name}</td>
-        <td>${s.n}</td>
-        <td>${fmtNum(s.mean, 2)}%</td>
-        <td>${fmtNum(s.median, 2)}%</td>
-        <td>${fmtNum(s.sd, 2)}%</td>
-        <td>${fmtNum(s.min, 2)}%</td>
-        <td>${fmtNum(s.p05, 2)}%</td>
-        <td>${fmtNum(s.p95, 2)}%</td>
-        <td>${fmtNum(s.max, 2)}%</td>
-        <td>${fmtNum(s.winRate, 1)}%</td>
+        <td data-label="n">${s.n}</td>
+        <td data-label="Mean">${fmtNum(s.mean, 2)}%</td>
+        <td data-label="Median">${fmtNum(s.median, 2)}%</td>
+        <td data-label="SD">${fmtNum(s.sd, 2)}%</td>
+        <td data-label="Min">${fmtNum(s.min, 2)}%</td>
+        <td data-label="p05">${fmtNum(s.p05, 2)}%</td>
+        <td data-label="p95">${fmtNum(s.p95, 2)}%</td>
+        <td data-label="Max">${fmtNum(s.max, 2)}%</td>
+        <td data-label="Win rate">${fmtNum(s.winRate, 1)}%</td>
       </tr>`;
     }
     html += "</tbody>";
     el("rollingSummaryTable").innerHTML = html;
+
+    const parts = study.byStrategy.map((s) => `${s.name.replace(/^\d+\s*·\s*/, "")} win ${fmtNum(s.winRate, 0)}%`);
+    el("rollingHeadline").textContent = `${cfg.windowMonths}m · N≈${study.effectiveN} · ${parts.join(" · ")}`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Mobile copy-to-clipboard summaries: terse, fixed-width plain text,
+  // built from exactly the same data already on screen (lastDataCheckReport
+  // / lastResults / lastBenchmarkRun / lastRollingRun) so a summary can
+  // never say something the panel above it doesn't. Every builder degrades
+  // to a one-line "(not yet run)" instead of throwing when its section
+  // hasn't been run yet, since Copy-all always calls all four.
+  // ---------------------------------------------------------------------
+
+  function shortStrategyCode(label) {
+    if (/DCA/i.test(label)) return "DCA";
+    if (/linear/i.test(label)) return "PL^1";
+    if (/squared/i.test(label)) return "PL^2";
+    if (/threshold/i.test(label)) return "THR";
+    return label.replace(/^\d+\s*·\s*/, "").slice(0, 6);
+  }
+
+  function signedNum(v, decimals) {
+    if (v == null || !Number.isFinite(v)) return "—";
+    return (v >= 0 ? "+" : "") + fmtNum(v, decimals);
+  }
+
+  function buildDataSummaryText() {
+    const r = lastDataCheckReport;
+    if (!r) return "DATA CHECK\n(not yet run)";
+    const h = r.health;
+    const lines = ["DATA CHECK"];
+    lines.push(`source   ${DATA.source || "unknown"}`);
+    lines.push(`range    ${formatDMY(DATA.startDate)} - ${formatDMY(h.lastDate)}  (${h.rows} rows)`);
+    lines.push(`last     ${fmtNum(h.lastClose, 0)}`);
+    lines.push(`gaps     ${h.gapDays}    zeros ${h.zeroOrNegativeCount}    dups ${fmtNum(r.shape.repeatedClosePct, 1)}%`);
+    const ac = r.athCheck;
+    lines.push(
+      `ATH      ${fmtNum(ac.ath.price, 0)} on ${formatDMY(ac.ath.date)}   ` +
+        `[exp ${ac.anchor ? fmtNum(ac.anchor.price, 0) : "—"} +-${ac.anchor ? ac.anchor.tolerancePct : "—"}%]  ${ac.pass ? "PASS" : "FAIL"}`
+    );
+    if (r.live === undefined) {
+      lines.push("live     checking…");
+    } else if (r.live === null) {
+      lines.push("live     unavailable (network unreachable)");
+    } else {
+      lines.push(
+        `live     ${fmtNum(r.live.medianAbsPct, 1)}% median dev over ${r.live.overlapDays}d           ${r.live.overlapPass ? "PASS" : "FAIL"}`
+      );
+    }
+    lines.push(`vol      ${fmtNum(r.shape.annualVol, 1)}%  [45-75]   ${r.volPass ? "PASS" : "FAIL"}`);
+    lines.push(`>5%days  ${fmtNum(r.shape.bigMovePct, 1)}%   [3-5]     ${r.bigMovePass ? "PASS" : "FAIL"}`);
+    lines.push(`kurtosis ${fmtNum(r.shape.kurtosis, 1)}    [>5]      ${r.kurtosisPass ? "PASS" : "FAIL"}`);
+    const reason = hardFail(r);
+    lines.push(`VERDICT  ${reason ? "FAIL — " + reason : "PASS"}`);
+    return lines.join("\n");
+  }
+
+  function buildBacktestSummaryText() {
+    if (!lastResults) return "BACKTEST\n(not yet run)";
+    const { strategies, committedMismatch, baseline } = lastResults;
+    const codes = strategies.map((s) => shortStrategyCode(s.label));
+    const labelW = 12;
+    const colW = 9;
+    const dataRow = (label, values) => label.padEnd(labelW) + values.map((v) => String(v).padStart(colW)).join("");
+
+    const months = strategies[0].trace.length;
+    const deposits = strategies.map((s) => s.deposit);
+    const equalDeposits = deposits.every((d) => d === deposits[0]);
+
+    const lines = [];
+    lines.push(`BACKTEST  ${formatDMY(state.startDate)} - ${formatDMY(state.endDate)}  (${months} months)`);
+    lines.push(`fit ${state.fitMode} | calib ${state.calibration ? "on" : "off"} | funding ${state.fundingMode}`);
+    lines.push(equalDeposits ? `deposit ${fmtNum(deposits[0], 0)} all strategies` : "deposit varies by strategy (see table)");
+    lines.push("");
+    lines.push(" ".repeat(labelW) + codes.map((c) => c.padStart(colW)).join(""));
+    lines.push(dataRow("deposited", strategies.map((s) => fmtNum(s.metrics.deposited, 0))));
+    lines.push(dataRow("invested", strategies.map((s) => fmtNum(s.metrics.invested, 0))));
+    lines.push(dataRow("cash left", strategies.map((s) => fmtNum(s.metrics.cashLeft, 0))));
+    lines.push(dataRow("BTC", strategies.map((s) => fmtNum(s.metrics.btcAccumulated, 3))));
+    lines.push(dataRow("avg cost", strategies.map((s) => fmtNum(s.metrics.avgCostBasis, 0))));
+    lines.push(dataRow("value", strategies.map((s) => fmtNum(s.metrics.totalValue, 0))));
+    lines.push(dataRow("XIRR", strategies.map((s) => fmtPct(s.metrics.xirr, 1))));
+    lines.push(dataRow("starved", strategies.map((s) => String(s.metrics.starvedMonths))));
+    if (!committedMismatch) {
+      lines.push(
+        dataRow(
+          "dBTC vs DCA",
+          strategies.map((s) => (s === baseline ? "-" : signedNum(s.comparison.deltaBtcPct, 1) + "%"))
+        )
+      );
+    }
+    return lines.join("\n");
+  }
+
+  function buildBenchmarkSummaryText() {
+    if (!lastBenchmarkRun) return "BENCHMARK\n(not yet run)";
+    const { suite, strat } = lastBenchmarkRun;
+    const r = suite.results[0];
+    const perm = r.permutation;
+    const code = shortStrategyCode(strat.name);
+    const dcaBtc = suite.dca.btc;
+    const nullVsDcaPct = dcaBtc > 0 ? ((perm.nullMean - dcaBtc) / dcaBtc) * 100 : null;
+
+    const lines = ["CEILING / FLOOR"];
+    lines.push(`perfect timing   ${signedNum(suite.maxPossibleEdgePct, 1)}% BTC vs DCA`);
+    lines.push(`worst timing     ${fmtNum(suite.minPossibleEdgePct, 1)}%`);
+    lines.push(`captured  ${code}  ${r.capture == null ? "—" : fmtNum(r.capture * 100, 1) + "%"}`);
+    lines.push("");
+    lines.push(`PERMUTATION (${perm.nullBtc.length} shuffles)`);
+    lines.push("        p      pctile  nullMean vs DCA");
+    lines.push(
+      `${code.padEnd(6)}${fmtNum(perm.pValue, 3).padStart(6)}  ${fmtNum(perm.percentile, 1).padStart(8)}  ` +
+        `${nullVsDcaPct == null ? "—" : signedNum(nullVsDcaPct, 1) + "%"}`
+    );
+    lines.push(`real starved ${perm.observedStarvedMonths} | shuffled mean ${fmtNum(perm.nullMeanStarvedMonths, 1)}`);
+    lines.push(`real invested ${fmtNum(perm.observedInvested, 0)} | shuffled ${fmtNum(perm.nullMeanInvested, 0)}`);
+    return lines.join("\n");
+  }
+
+  function buildRollingSummaryText() {
+    if (!lastRollingRun) return "ROLLING WINDOWS\n(not yet run)";
+    const { study, cfg } = lastRollingRun;
+    const lines = [`ROLLING WINDOWS  ${cfg.windowMonths}m`];
+    lines.push(`windows ${study.windows.length} | effective N ${study.effectiveN}`);
+    lines.push("        mean  med    p05    p95   win%");
+    for (const s of study.byStrategy) {
+      const code = shortStrategyCode(s.name);
+      lines.push(
+        `${code.padEnd(8)}${signedNum(s.mean, 1).padStart(5)} ${signedNum(s.median, 1).padStart(5)} ` +
+          `${signedNum(s.p05, 1).padStart(6)} ${signedNum(s.p95, 1).padStart(6)}   ${fmtNum(s.winRate, 0)}`
+      );
+    }
+    return lines.join("\n");
+  }
+
+  // Timestamp + git short hash (if the deploy set window.APP_COMMIT — this
+  // is a static, no-build app, so there's no build step to embed one
+  // automatically; omitted rather than faked when absent).
+  function buildCopyAllText() {
+    const ts = new Date().toISOString().replace("T", " ").slice(0, 19) + "Z";
+    const hashSuffix = window.APP_COMMIT ? ` (${window.APP_COMMIT})` : "";
+    return [
+      `BTC Power-Law DCA Backtester — ${ts}${hashSuffix}`,
+      buildDataSummaryText(),
+      buildBacktestSummaryText(),
+      buildBenchmarkSummaryText(),
+      buildRollingSummaryText(),
+    ].join("\n\n");
+  }
+
+  window.summary = function () {
+    return buildCopyAllText();
+  };
+
+  function fallbackCopy(text, done) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch (e) {
+      // Nothing more we can do — the text is at least selected for a manual copy.
+    }
+    document.body.removeChild(ta);
+    done();
+  }
+
+  function copyText(text, btn) {
+    const done = () => {
+      if (!btn) return;
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      btn.classList.add("copied");
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove("copied");
+      }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    } else {
+      fallbackCopy(text, done);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1575,6 +1929,12 @@
     el("runBenchmarkBtn").addEventListener("click", runBenchmarks);
     el("runRollingBtn").addEventListener("click", runRolling);
     el("runSweepBtn").addEventListener("click", runDeploymentSweep);
+
+    el("dataCopyBtn").addEventListener("click", () => copyText(buildDataSummaryText(), el("dataCopyBtn")));
+    el("backtestCopyBtn").addEventListener("click", () => copyText(buildBacktestSummaryText(), el("backtestCopyBtn")));
+    el("benchmarkCopyBtn").addEventListener("click", () => copyText(buildBenchmarkSummaryText(), el("benchmarkCopyBtn")));
+    el("rollingCopyBtn").addEventListener("click", () => copyText(buildRollingSummaryText(), el("rollingCopyBtn")));
+    el("copyAllBtn").addEventListener("click", () => copyText(buildCopyAllText(), el("copyAllBtn")));
 
     el("downloadCsvBtn").addEventListener("click", () => {
       if (!lastResults) return;

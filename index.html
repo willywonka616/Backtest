@@ -232,6 +232,83 @@
   .verify-strip.unverified { border-color: var(--muted); color: var(--muted); }
   #verifyDetail summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; margin-top: 0.6rem; }
 
+  /* Mobile-readable verdict strip + numbers block */
+  .verdict-strip {
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    font-family: var(--mono);
+    border: 1px solid var(--border);
+    margin-bottom: 0.85rem;
+  }
+  .verdict-strip.pass { border-color: var(--green); color: var(--green); background: rgba(62,207,110,0.08); }
+  .verdict-strip.fail { border-color: var(--red); color: var(--red); background: rgba(239,83,80,0.08); }
+  .verdict-strip.checking { border-color: var(--muted); color: var(--muted); }
+  .numbers-block { display: flex; flex-direction: column; }
+  .num-row { padding: 0.45rem 0; border-bottom: 1px solid var(--border); }
+  .num-row:last-child { border-bottom: none; }
+  .num-row.ath { font-weight: 700; }
+  .num-top { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
+  .num-label { color: var(--text); font-size: 0.85rem; }
+  .num-value { font-family: var(--mono); font-size: 0.9rem; text-align: right; white-space: nowrap; }
+  .num-sub { display: flex; justify-content: flex-end; align-items: center; gap: 0.35rem; margin-top: 0.15rem; font-size: 0.72rem; color: var(--muted); text-align: right; }
+  .chip-dot { display: inline-block; width: 0.6em; height: 0.6em; border-radius: 50%; flex: none; }
+  .chip-dot.pass { background: var(--green); }
+  .chip-dot.fail { background: var(--red); }
+  .chip-dot.neutral { background: var(--muted); }
+
+  /* Collapsible panel sections with a headline visible while collapsed */
+  details.panel-section { margin: 0; }
+  details.panel-section > summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  details.panel-section > summary::-webkit-details-marker { display: none; }
+  details.panel-section > summary::before {
+    content: "▸";
+    color: var(--muted);
+    font-size: 0.8rem;
+    transition: transform 0.15s ease;
+  }
+  details.panel-section[open] > summary::before { transform: rotate(90deg); }
+  details.panel-section > summary .n {
+    color: var(--orange);
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 1rem;
+  }
+  details.panel-section > summary .section-title {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    font-size: 1rem;
+  }
+  details.panel-section > summary .summary-headline {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-left: auto;
+  }
+  details.panel-section[open] > summary .summary-headline { display: none; }
+
+  /* Copy-to-clipboard buttons */
+  .copy-row { display: flex; justify-content: flex-end; margin-top: 0.6rem; }
+  .copy-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.5rem 1rem;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  .copy-btn.copied { border-color: var(--green); color: var(--green); }
+  #copyAllRow { display: flex; justify-content: flex-end; padding: 0.75rem 1.25rem 0; max-width: 1200px; margin: 0 auto; }
+
   /* Benchmarks headline (Panel B) */
   .headline-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 0.5rem; }
   .headline-item { border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 0.9rem; }
@@ -261,6 +338,51 @@
     table.results { font-size: 0.75rem; }
     .row { flex-direction: column; }
   }
+
+  /* Mobile readouts: stacked tables, full-bleed charts, legend above plot */
+  @media (max-width: 600px) {
+    main { padding: 0 0.6rem; }
+    #copyAllRow { padding-left: 0.6rem; padding-right: 0.6rem; }
+    table.results, table.results thead, table.results tbody,
+    table.results th, table.results td, table.results tr { display: block; }
+    table.results thead { position: absolute; left: -9999px; }
+    table.results tr {
+      margin-bottom: 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.35rem 0.6rem;
+    }
+    table.results tr:last-child { margin-bottom: 0; }
+    table.results td {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.5rem;
+      border-bottom: none !important;
+      padding: 0.22rem 0;
+      text-align: right;
+      white-space: normal;
+    }
+    table.results td:first-child {
+      font-family: var(--sans);
+      font-weight: 600;
+      color: var(--text);
+      justify-content: flex-start;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border) !important;
+      margin-bottom: 0.2rem;
+    }
+    table.results td:not(:first-child)::before {
+      content: attr(data-label);
+      color: var(--muted);
+      font-family: var(--sans);
+      text-align: left;
+    }
+    table.results td:not(:first-child):not([data-label])::before { content: none; }
+    .chart-container { min-height: 240px; margin: 0 -0.6rem; width: calc(100% + 1.2rem); }
+    .chart-container .uplot { display: flex; flex-direction: column-reverse; }
+    .chart-container .u-legend { margin-bottom: 0.4rem; }
+  }
 </style>
 </head>
 <body>
@@ -269,24 +391,33 @@
   <p>Compare plain DCA against power-law-weighted accumulation under a realistic cash reserve. USD only — see README.</p>
 </header>
 
+<div id="copyAllRow"><button id="copyAllBtn" type="button" class="copy-btn primary">Copy all (paste into chat)</button></div>
+
 <main>
 
   <section id="dataError" class="panel" style="border-color: var(--red); display:none;"></section>
 
   <section id="dataVerifySection">
-    <h2><span class="n">01</span> Data verification</h2>
-    <div class="panel">
-      <div id="verifyStrip" class="verify-strip">Checking committed data…</div>
-      <details id="verifyDetail" style="margin-top:0.75rem;">
-        <summary>Details</summary>
-        <div id="verifyOverlayChart" class="chart-container" style="margin-top:0.5rem;"></div>
-        <p class="chart-hint" id="verifyOverlayHint" hidden>Committed vs. live close over the overlapping window.</p>
-        <h3 style="font-size:0.85rem; margin:1rem 0 0.4rem;">Anchors</h3>
-        <div class="table-scroll"><table class="results" id="anchorTable"></table></div>
-        <h3 style="font-size:0.85rem; margin:1rem 0 0.4rem;">Shape diagnostics</h3>
-        <div class="table-scroll"><table class="results" id="shapeTable"></table></div>
-      </details>
-    </div>
+    <details class="panel-section" id="dataVerifyDetails" open>
+      <summary>
+        <span class="n">01</span><span class="section-title">Data verification</span>
+        <span class="summary-headline" id="dataVerifyHeadline">Checking…</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div id="verdictStrip" class="verdict-strip checking">Checking committed data…</div>
+        <div class="numbers-block" id="numbersBlock"></div>
+        <div class="copy-row"><button id="dataCopyBtn" type="button" class="copy-btn">Copy</button></div>
+        <details id="verifyDetail" style="margin-top:0.9rem;">
+          <summary>Chart &amp; raw tables</summary>
+          <div id="verifyOverlayChart" class="chart-container" style="margin-top:0.5rem;"></div>
+          <p class="chart-hint" id="verifyOverlayHint" hidden>Committed vs. live close over the overlapping window.</p>
+          <h3 style="font-size:0.85rem; margin:1rem 0 0.4rem;">Anchors</h3>
+          <div class="table-scroll"><table class="results" id="anchorTable"></table></div>
+          <h3 style="font-size:0.85rem; margin:1rem 0 0.4rem;">Shape diagnostics (full history)</h3>
+          <div class="table-scroll"><table class="results" id="shapeTable"></table></div>
+        </details>
+      </div>
+    </details>
   </section>
 
   <section id="priceChartSection">
@@ -482,21 +613,27 @@
   </section>
 
   <section id="resultsSection">
-    <h2><span class="n">04</span> Results</h2>
-    <div class="panel">
-      <div class="amber-banner" id="unboundBanner" hidden>
-        Diagnostic only: unbound funding lets the reserve go negative (i.e. borrows to fund every desired purchase in
-        full). This is never a runnable strategy — it exists to separate "the funding constraint hurt the strategy"
-        from "the multiplier shape is the problem." Excluded from the optimizer. Results below are shown muted.
+    <details class="panel-section" id="resultsDetails" open>
+      <summary>
+        <span class="n">04</span><span class="section-title">Results</span>
+        <span class="summary-headline" id="resultsHeadline">Run the backtest to see results.</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="amber-banner" id="unboundBanner" hidden>
+          Diagnostic only: unbound funding lets the reserve go negative (i.e. borrows to fund every desired purchase in
+          full). This is never a runnable strategy — it exists to separate "the funding constraint hurt the strategy"
+          from "the multiplier shape is the problem." Excluded from the optimizer. Results below are shown muted.
+        </div>
+        <div class="hint-banner mismatch" id="committedMismatchHint" hidden>
+          Total committed capital differs between strategies (see the row below), so the "vs. DCA" delta rows are not shown —
+          a delta is only meaningful when every strategy put in the same amount.
+        </div>
+        <div id="resultsPanelBody" class="table-scroll">
+          <table class="results" id="resultsTable"></table>
+        </div>
+        <div class="copy-row"><button id="backtestCopyBtn" type="button" class="copy-btn">Copy</button></div>
       </div>
-      <div class="hint-banner mismatch" id="committedMismatchHint" hidden>
-        Total committed capital differs between strategies (see the row below), so the "vs. DCA" delta rows are not shown —
-        a delta is only meaningful when every strategy put in the same amount.
-      </div>
-      <div id="resultsPanelBody" class="table-scroll">
-        <table class="results" id="resultsTable"></table>
-      </div>
-    </div>
+    </details>
   </section>
 
   <section id="valueChartSection">
@@ -524,43 +661,49 @@
   </section>
 
   <section id="benchmarksSection">
-    <h2><span class="n">08</span> Benchmarks: ceiling, floor &amp; significance</h2>
-    <div class="panel">
-      <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
-        <div class="field">
-          <label for="benchmarkStrategy">Strategy to benchmark</label>
-          <select id="benchmarkStrategy">
-            <option value="1">2 · Power-law linear</option>
-            <option value="2">3 · Power-law squared</option>
-            <option value="3" id="benchmarkStrategyThresholdOpt" hidden>4 · Threshold reserve</option>
-          </select>
+    <details class="panel-section" id="benchmarksDetails">
+      <summary>
+        <span class="n">08</span><span class="section-title">Benchmarks: ceiling, floor &amp; significance</span>
+        <span class="summary-headline" id="benchmarksHeadline">Not run yet.</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
+          <div class="field">
+            <label for="benchmarkStrategy">Strategy to benchmark</label>
+            <select id="benchmarkStrategy">
+              <option value="1">2 · Power-law linear</option>
+              <option value="2">3 · Power-law squared</option>
+              <option value="3" id="benchmarkStrategyThresholdOpt" hidden>4 · Threshold reserve</option>
+            </select>
+          </div>
+          <div class="field">
+            <button id="runBenchmarkBtn" class="primary" type="button">Run benchmarks</button>
+          </div>
         </div>
-        <div class="field">
-          <button id="runBenchmarkBtn" class="primary" type="button">Run benchmarks</button>
-        </div>
-      </div>
-      <div id="benchmarkResults" hidden>
-        <div class="headline-row" id="benchmarkHeadline"></div>
-        <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Where the money went</h3>
-        <div id="allocationChart" class="chart-container"></div>
-        <div class="legend-row">
-          <span><span class="swatch" style="background:rgba(230,230,230,0.4)"></span>Clairvoyant allocation (ceiling)</span>
-          <span><span class="swatch s2"></span>Strategy's actual spend</span>
-          <span><span class="swatch" style="background:rgba(255,255,255,0.7)"></span>Price (log)</span>
-        </div>
-        <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Is the edge real? (permutation test)</h3>
-        <p class="chart-hint">Same multipliers, months shuffled. If the real chronological order doesn't beat most shuffles, the edge is size, not timing.</p>
-        <div id="permutationChart" class="chart-container"></div>
-        <p class="chart-hint" id="permutationCaption"></p>
+        <div id="benchmarkResults" hidden>
+          <div class="headline-row" id="benchmarkHeadline"></div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Where the money went</h3>
+          <div id="allocationChart" class="chart-container"></div>
+          <div class="legend-row">
+            <span><span class="swatch" style="background:rgba(230,230,230,0.4)"></span>Clairvoyant allocation (ceiling)</span>
+            <span><span class="swatch s2"></span>Strategy's actual spend</span>
+            <span><span class="swatch" style="background:rgba(255,255,255,0.7)"></span>Price (log)</span>
+          </div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Is the edge real? (permutation test)</h3>
+          <p class="chart-hint">Same multipliers, months shuffled. If the real chronological order doesn't beat most shuffles, the edge is size, not timing.</p>
+          <div id="permutationChart" class="chart-container"></div>
+          <p class="chart-hint" id="permutationCaption"></p>
 
-        <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Real vs. shuffled: what actually differs</h3>
-        <p class="chart-hint">The permutation shuffle keeps the same multipliers and the same funding mode — only which month each one lands on changes. If the real run and the shuffled average agree on invested/deployment rate but disagree on BTC, the edge is timing; if they disagree on invested/deployment rate too, some of the "edge" is really just funding starvation working differently under shuffling.</p>
-        <div class="table-scroll">
-          <table class="results" id="diagnosticsTable"></table>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Real vs. shuffled: what actually differs</h3>
+          <p class="chart-hint">The permutation shuffle keeps the same multipliers and the same funding mode — only which month each one lands on changes. If the real run and the shuffled average agree on invested/deployment rate but disagree on BTC, the edge is timing; if they disagree on invested/deployment rate too, some of the "edge" is really just funding starvation working differently under shuffling.</p>
+          <div class="table-scroll">
+            <table class="results" id="diagnosticsTable"></table>
+          </div>
+          <p class="chart-hint" id="diagnosticsInterpretation" style="margin-top:0.6rem;"></p>
+          <div class="copy-row"><button id="benchmarkCopyBtn" type="button" class="copy-btn">Copy</button></div>
         </div>
-        <p class="chart-hint" id="diagnosticsInterpretation" style="margin-top:0.6rem;"></p>
       </div>
-    </div>
+    </details>
   </section>
 
   <section id="deploymentSweepSection">
@@ -587,38 +730,44 @@
   </section>
 
   <section id="rollingSection">
-    <h2><span class="n">09</span> Rolling windows</h2>
-    <div class="panel">
-      <div class="warning-banner">
-        One full-period result is one observation. This slides a fixed-length window across the whole series so you can see
-        whether that result was typical or lucky.
-      </div>
-      <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
-        <div class="field">
-          <label for="rollingWindowMonths">Window length</label>
-          <select id="rollingWindowMonths">
-            <option value="24">24 months</option>
-            <option value="36">36 months</option>
-            <option value="48" selected>48 months</option>
-            <option value="60">60 months</option>
-          </select>
+    <details class="panel-section" id="rollingDetails">
+      <summary>
+        <span class="n">09</span><span class="section-title">Rolling windows</span>
+        <span class="summary-headline" id="rollingHeadline">Not run yet.</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="warning-banner">
+          One full-period result is one observation. This slides a fixed-length window across the whole series so you can see
+          whether that result was typical or lucky.
         </div>
-        <div class="field">
-          <button id="runRollingBtn" class="primary" type="button">Run rolling study</button>
+        <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
+          <div class="field">
+            <label for="rollingWindowMonths">Window length</label>
+            <select id="rollingWindowMonths">
+              <option value="24">24 months</option>
+              <option value="36">36 months</option>
+              <option value="48" selected>48 months</option>
+              <option value="60">60 months</option>
+            </select>
+          </div>
+          <div class="field">
+            <button id="runRollingBtn" class="primary" type="button">Run rolling study</button>
+          </div>
+        </div>
+        <div id="rollingResults" hidden>
+          <p class="chart-hint" id="effectiveNNote"></p>
+          <h3 style="font-size:0.9rem; margin:0.75rem 0 0.4rem;">Δ BTC vs. DCA by window start date</h3>
+          <div id="deltaVsStartChart" class="chart-container"></div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Distribution of Δ BTC vs. DCA</h3>
+          <div id="rollingHistograms"></div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Summary</h3>
+          <div class="table-scroll">
+            <table class="results" id="rollingSummaryTable"></table>
+          </div>
+          <div class="copy-row"><button id="rollingCopyBtn" type="button" class="copy-btn">Copy</button></div>
         </div>
       </div>
-      <div id="rollingResults" hidden>
-        <p class="chart-hint" id="effectiveNNote"></p>
-        <h3 style="font-size:0.9rem; margin:0.75rem 0 0.4rem;">Δ BTC vs. DCA by window start date</h3>
-        <div id="deltaVsStartChart" class="chart-container"></div>
-        <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Distribution of Δ BTC vs. DCA</h3>
-        <div id="rollingHistograms"></div>
-        <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Summary</h3>
-        <div class="table-scroll">
-          <table class="results" id="rollingSummaryTable"></table>
-        </div>
-      </div>
-    </div>
+    </details>
   </section>
 
   <section id="optimizerSection">

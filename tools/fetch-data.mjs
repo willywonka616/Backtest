@@ -151,6 +151,8 @@ async function main() {
     `// Do not hand-edit. Re-run \`node tools/fetch-data.mjs\` to refresh.\n` +
     `window.BTC_DATA = {\n` +
     `  startDate: ${JSON.stringify(startDate)},\n` +
+    `  source: ${JSON.stringify(sourceName)},\n` +
+    `  fillCount: ${filled}, // calendar days forward-filled from the previous close at fetch time\n` +
     `  closes: [${closes.map((c) => roundClose(c)).join(",")}]\n` +
     `};\n`;
 

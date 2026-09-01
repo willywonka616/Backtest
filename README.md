@@ -75,13 +75,37 @@ is investment advice.
 ## Data verification
 
 Section 01 checks the committed price series against a live source (CoinGecko) on load,
-plus two checks that need no network at all: fixed price anchors (the all-time high has to
-land where independent aggregators put it) and shape diagnostics (real BTC returns are
-fat-tailed — a kurtosis near 3 would mean the series was generated from a normal distribution,
-not observed). The live check needs network access and same-origin fetch; it can't run under
-`file://` (CORS) and is reported as "unverified," not as a failure, in that case. Only a genuine
-mismatch against the live source disables the backtest controls — a stale file or an
-unreachable network never does.
+plus checks that need no network at all: freshness (the last date can't be more than 3 days
+old), gaps and zero/negative closes (the pipeline's own forward-fill count, embedded in
+`js/data.js` as `fillCount` — see `tools/fetch-data.mjs`), fixed price anchors (the all-time
+high has to land where independent aggregators put it), and shape diagnostics over a trailing
+2-year window (real BTC returns are fat-tailed — a kurtosis near 3 would mean the series was
+generated from a normal distribution, not observed; the shape checks use a recent window
+rather than the full 2010– history, since BTC's early years are legitimately far more volatile
+than anything since). The live check needs network access and same-origin fetch; it can't run
+under `file://` (CORS) and is reported as "unavailable," not as a failure, in that case.
+
+A hard failure on freshness, gaps, zero/negative closes, the ATH anchor, or a live-source
+mismatch disables the backtest controls until it's resolved — unlike volatility/big-move-day/
+kurtosis/repeated-close diagnostics, which get their own pass/fail indicator but stay advisory
+only, since they can legitimately vary run to run without indicating a broken pipeline.
+
+### Mobile readouts
+
+The verdict strip and numbers block above are designed to be read on a phone without opening
+a file: single column, monospace right-aligned values, a coloured dot plus expected range
+under anything that has one. Every major section (data verification, results, benchmarks,
+rolling windows) is collapsible with its headline visible in the collapsed header, so the page
+scans without expanding anything, and every table collapses to stacked label/value rows below
+600px instead of scrolling horizontally.
+
+A **Copy** button next to each section heading copies a terse, fixed-width plain-text summary
+of that section — short enough to paste from a phone into a chat. A **Copy all** button at the
+top of the page joins all four (data check, backtest, benchmarks, rolling) with a timestamp,
+for the single artifact worth pasting when discussing a run. The data-check block is also
+logged to the console automatically on load, and `window.summary()` returns the same
+copy-all text — both useful if the page fails to render but the data question still needs
+answering.
 
 ## Benchmarks: ceiling, floor, and significance
 
@@ -185,8 +209,11 @@ invalidate every comparison the app makes), the ceiling/floor bracketing DCA, th
 test's degenerate case, the data-verification helpers, the `targetDeployment` calibration
 identity, `lumpSumAtStart` conservation (same total committed, different deployment timing), the
 threshold strategy's baseRate/reserve-fraction shape on a hand-worked synthetic series, unbound
-funding's ability to go into debt versus strict/seeded never doing so, and `computeMetrics`
-folding starting capital into `totalCommitted` and the XIRR t0 outflow.
+funding's ability to go into debt versus strict/seeded never doing so, `computeMetrics`
+folding starting capital into `totalCommitted` and the XIRR t0 outflow, and the mobile
+data-check helpers (`findATH` locating a synthetic series' true peak rather than its last
+value, `dataHealth` counting zero/negative closes and reading the committed `fillCount`, and
+`staleDays` against both a stale and a fresh reference date).
 
 ## Repository layout
 
