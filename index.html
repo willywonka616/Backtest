@@ -129,6 +129,7 @@
   .strategy-2 legend, .swatch.s2 { color: var(--orange); }
   .strategy-3 legend, .swatch.s3 { color: var(--teal); }
   .strategy-1 legend, .swatch.s1 { color: var(--slate); }
+  .strategy-4 legend, .swatch.s4 { color: #c77dff; }
   .swatch { display: inline-block; width: 0.7em; height: 0.7em; border-radius: 2px; margin-right: 0.35em; background: currentColor; }
 
   /* Results table */
@@ -159,6 +160,21 @@
     margin-bottom: 0.75rem;
   }
   .hint-banner[hidden] { display: none; }
+  .hint-banner.mismatch { border-color: var(--red); background: rgba(239,83,80,0.1); }
+
+  .amber-banner {
+    background: rgba(247,147,26,0.12);
+    border: 1px solid var(--orange);
+    color: var(--orange);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.82rem;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+  }
+  .amber-banner[hidden] { display: none; }
+  .diagnostic-mode table.results { opacity: 0.55; filter: grayscale(0.3); }
+  .diagnostic-mode .chart-container { opacity: 0.55; filter: grayscale(0.3); }
 
   /* Chart legends */
   .legend-row { display: flex; gap: 1rem; margin-bottom: 0.5rem; font-size: 0.8rem; flex-wrap: wrap; }
@@ -318,11 +334,35 @@
         </div>
       </fieldset>
 
+      <fieldset>
+        <legend>Funding</legend>
+        <div class="field">
+          <label for="fundingMode">Funding mode</label>
+          <select id="fundingMode">
+            <option value="strict">Strict (reserve starts at 0, never negative)</option>
+            <option value="seeded">Seeded (reserve starts at starting capital)</option>
+            <option value="unbound">Unbound (diagnostic only — can borrow)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="startingCapital">Starting capital (USD, t0, all strategies)</label>
+          <input type="number" id="startingCapital" min="0" step="100" />
+        </div>
+        <div class="field">
+          <label for="reserveRateAnnual">Yield on reserve (annual %)</label>
+          <input type="number" id="reserveRateAnnual" step="0.1" />
+        </div>
+      </fieldset>
+
       <fieldset class="strategy-1">
         <legend><span class="swatch s1"></span>1 · DCA</legend>
         <div class="field">
           <label for="depositDca">Monthly deposit (USD)</label>
           <input type="number" id="depositDca" min="0" step="10" />
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumDca" />
+          <label for="lumpSumDca" style="margin:0;">Deploy starting capital immediately</label>
         </div>
       </fieldset>
 
@@ -342,6 +382,14 @@
             <input type="number" id="mMaxLinear" min="0" step="0.25" />
           </div>
         </div>
+        <div class="field">
+          <label for="targetDeploymentLinear">Target deployment (0.3 – 1.0)</label>
+          <input type="number" id="targetDeploymentLinear" min="0.3" max="1" step="0.05" />
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumLinear" />
+          <label for="lumpSumLinear" style="margin:0;">Deploy starting capital immediately</label>
+        </div>
       </fieldset>
 
       <fieldset class="strategy-3">
@@ -359,6 +407,64 @@
             <label for="mMaxSquared">m max</label>
             <input type="number" id="mMaxSquared" min="0" step="0.25" />
           </div>
+        </div>
+        <div class="field">
+          <label for="targetDeploymentSquared">Target deployment (0.3 – 1.0)</label>
+          <input type="number" id="targetDeploymentSquared" min="0.3" max="1" step="0.05" />
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumSquared" />
+          <label for="lumpSumSquared" style="margin:0;">Deploy starting capital immediately</label>
+        </div>
+      </fieldset>
+
+      <fieldset class="strategy-4">
+        <legend><span class="swatch s4"></span>4 · Threshold reserve</legend>
+        <div class="field toggle-row">
+          <input type="checkbox" id="thresholdEnabled" />
+          <label for="thresholdEnabled" style="margin:0;">Enable (off by default)</label>
+        </div>
+        <div class="field">
+          <label for="depositThreshold">Monthly deposit (USD)</label>
+          <input type="number" id="depositThreshold" min="0" step="10" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="mMinThreshold">m min</label>
+            <input type="number" id="mMinThreshold" min="0" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="mMaxThreshold">m max</label>
+            <input type="number" id="mMaxThreshold" min="0" step="0.25" />
+          </div>
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="thresholdUseBand" />
+          <label for="thresholdUseBand" style="margin:0;">Define "deep value" as a ±σ residual band</label>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="thresholdEnterRatio">Enter ratio (fair/price), used unless band is checked</label>
+            <input type="number" id="thresholdEnterRatio" min="1" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="thresholdBandSigma">Band width (σ), used if band is checked</label>
+            <input type="number" id="thresholdBandSigma" min="0" step="0.1" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="thresholdBaseRate">Base rate (below threshold)</label>
+            <input type="number" id="thresholdBaseRate" min="0" max="1" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="thresholdSpendFraction">Reserve spend fraction (at/above threshold)</label>
+            <input type="number" id="thresholdSpendFraction" min="0" max="1" step="0.05" />
+          </div>
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumThreshold" />
+          <label for="lumpSumThreshold" style="margin:0;">Deploy starting capital immediately</label>
         </div>
       </fieldset>
 
@@ -378,10 +484,16 @@
   <section id="resultsSection">
     <h2><span class="n">04</span> Results</h2>
     <div class="panel">
-      <div class="hint-banner" id="unequalDepositsHint" hidden>
-        Deposits differ between strategies — Δ BTC and Δ total value are no longer like-for-like. Compare MoIC and XIRR instead.
+      <div class="amber-banner" id="unboundBanner" hidden>
+        Diagnostic only: unbound funding lets the reserve go negative (i.e. borrows to fund every desired purchase in
+        full). This is never a runnable strategy — it exists to separate "the funding constraint hurt the strategy"
+        from "the multiplier shape is the problem." Excluded from the optimizer. Results below are shown muted.
       </div>
-      <div class="table-scroll">
+      <div class="hint-banner mismatch" id="committedMismatchHint" hidden>
+        Total committed capital differs between strategies (see the row below), so the "vs. DCA" delta rows are not shown —
+        a delta is only meaningful when every strategy put in the same amount.
+      </div>
+      <div id="resultsPanelBody" class="table-scroll">
         <table class="results" id="resultsTable"></table>
       </div>
     </div>
@@ -420,6 +532,7 @@
           <select id="benchmarkStrategy">
             <option value="1">2 · Power-law linear</option>
             <option value="2">3 · Power-law squared</option>
+            <option value="3" id="benchmarkStrategyThresholdOpt" hidden>4 · Threshold reserve</option>
           </select>
         </div>
         <div class="field">
@@ -439,6 +552,36 @@
         <p class="chart-hint">Same multipliers, months shuffled. If the real chronological order doesn't beat most shuffles, the edge is size, not timing.</p>
         <div id="permutationChart" class="chart-container"></div>
         <p class="chart-hint" id="permutationCaption"></p>
+
+        <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Real vs. shuffled: what actually differs</h3>
+        <p class="chart-hint">The permutation shuffle keeps the same multipliers and the same funding mode — only which month each one lands on changes. If the real run and the shuffled average agree on invested/deployment rate but disagree on BTC, the edge is timing; if they disagree on invested/deployment rate too, some of the "edge" is really just funding starvation working differently under shuffling.</p>
+        <div class="table-scroll">
+          <table class="results" id="diagnosticsTable"></table>
+        </div>
+        <p class="chart-hint" id="diagnosticsInterpretation" style="margin-top:0.6rem;"></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="deploymentSweepSection">
+    <h2><span class="n">08b</span> Deployment-ratio sweep</h2>
+    <div class="panel">
+      <p class="chart-hint">
+        Diagnostic workflow: under strict funding, sweep target deployment for the benchmarked strategy from 1.0 down to
+        0.5 and watch the permutation p-value (not the return). If p stays high throughout, the multiplier's shape isn't
+        producing a timing edge, whatever the funding constraint. If p drops sharply as target deployment falls, the
+        strategy needed unmet demand (starvation) to look non-random — the funding constraint was doing the work.
+      </p>
+      <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
+        <div class="field">
+          <button id="runSweepBtn" class="primary" type="button">Run sweep (1.0 → 0.5)</button>
+        </div>
+      </div>
+      <div id="sweepResults" hidden>
+        <div id="sweepChart" class="chart-container"></div>
+        <div class="table-scroll">
+          <table class="results" id="sweepTable"></table>
+        </div>
       </div>
     </div>
   </section>
@@ -486,6 +629,11 @@
           These boundaries are fitted to one realised price path. A lone bright cell is overfitting; a broad plateau is a real
           effect. A parameter set that only wins on the full period is curve-fitting, not a strategy — check the robustness panel below.
         </div>
+        <div class="amber-banner" id="optimizerUnboundWarning" hidden>
+          The optimizer does not run under unbound funding — it's a diagnostic mode (negative balances, i.e. borrowing),
+          and searching over it would rank boundaries by how much debt they're willing to take on. Switch funding mode
+          to strict or seeded in Controls first.
+        </div>
         <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
           <div class="field">
             <label for="optStrategy">Strategy to optimize</label>
@@ -501,6 +649,10 @@
               <option value="totalValue">Total value</option>
               <option value="xirr">XIRR</option>
             </select>
+          </div>
+          <div class="field">
+            <label for="optTargetDeployment">Target deployment (fixed)</label>
+            <input type="number" id="optTargetDeployment" min="0.3" max="1" step="0.05" />
           </div>
           <div class="field">
             <button id="runOptimizerBtn" class="primary" type="button">Run sweep</button>
@@ -537,6 +689,7 @@
             <option value="0">1 · DCA</option>
             <option value="1">2 · Power-law linear</option>
             <option value="2">3 · Power-law squared</option>
+            <option value="3" id="traceStrategyThresholdOpt" hidden>4 · Threshold reserve</option>
           </select>
           <button id="downloadCsvBtn" type="button">Download CSV</button>
         </div>

@@ -45,29 +45,60 @@
     return metrics.btcAccumulated; // default
   }
 
-  // opts: { p, startDate, endDate, deposit, startingBalance, fitMode, calibrationOn, objective }
+  // opts: { p, startDate, endDate, deposit, fitMode, calibrationOn, objective,
+  //         targetDeployment, fundingMode, startingCapital, reserveRateAnnual, lumpSumAtStart }
+  // The optimizer never runs under fundingMode 'unbound' — that mode is a
+  // diagnostic (borrowing against a negative balance), not a runnable
+  // strategy, so a search over it would rank parameter sets by how much debt
+  // they're willing to take on. See runSweep's guard.
   function evaluateCell(data, context, opts, mMin, mMax) {
     const params = {
       p: opts.p,
       mMin,
       mMax,
       deposit: opts.deposit,
-      startingBalance: opts.startingBalance || 0,
+      targetDeployment: opts.targetDeployment,
+      fundingMode: opts.fundingMode,
+      startingCapital: opts.startingCapital,
+      reserveRateAnnual: opts.reserveRateAnnual,
+      lumpSumAtStart: opts.lumpSumAtStart,
     };
-    const { trace } = B.runLedger(data, context, params, opts.calibrationOn);
-    const metrics = B.computeMetrics(data, trace, opts.deposit, opts.endDate);
+    const { trace, result } = B.runLedger(data, context, params, opts.calibrationOn);
+    const metrics = B.computeMetrics(data, trace, opts.deposit, opts.endDate, {
+      ledgerResult: result,
+      startingCapital: opts.startingCapital || 0,
+    });
     return { mMin, mMax, metrics, objectiveValue: objectiveValue(metrics, opts.objective) };
   }
 
   function computeBaseline(data, context, opts) {
-    const params = { p: 0, mMin: 0, mMax: 1, deposit: opts.deposit, startingBalance: opts.startingBalance || 0 };
-    const { trace } = B.runLedger(data, context, params, opts.calibrationOn);
-    return B.computeMetrics(data, trace, opts.deposit, opts.endDate);
+    const params = {
+      p: 0,
+      mMin: 0,
+      mMax: 1,
+      deposit: opts.deposit,
+      fundingMode: opts.fundingMode,
+      startingCapital: opts.startingCapital,
+      reserveRateAnnual: opts.reserveRateAnnual,
+      lumpSumAtStart: true, // DCA always deploys any starting capital immediately
+    };
+    const { trace, result } = B.runLedger(data, context, params, opts.calibrationOn);
+    return B.computeMetrics(data, trace, opts.deposit, opts.endDate, {
+      ledgerResult: result,
+      startingCapital: opts.startingCapital || 0,
+    });
   }
 
   // Synchronous full sweep. onProgress(done, total) is called after every cell,
   // cheap enough (~600 cells) to not need throttling.
   function runSweep(data, opts, onProgress) {
+    if (opts.fundingMode === "unbound") {
+      throw new Error(
+        "The optimizer does not run under unbound funding — it is a diagnostic mode (negative balances, i.e. " +
+          "borrowing) that would rank boundaries by how much debt they're willing to take on, not by timing skill. " +
+          "Switch funding mode to strict or seeded first."
+      );
+    }
     const context = B.prepareFairValueContext(data, opts.startDate, opts.endDate, opts.fitMode);
     const baseline = computeBaseline(data, context, opts);
     const grid = generateGrid();

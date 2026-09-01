@@ -6,7 +6,7 @@
   const B = window.Backtest;
   const DATA = window.BTC_DATA;
 
-  const COLOR = { dca: "#7a8ba6", linear: "#f7931a", squared: "#4fb3a9" };
+  const COLOR = { dca: "#7a8ba6", linear: "#f7931a", squared: "#4fb3a9", threshold: "#c77dff" };
 
   // ---------------------------------------------------------------------
   // Date helpers (strict DD.MM.YYYY <-> ISO)
@@ -75,12 +75,45 @@
       endDate: dataEndDate(),
       fitMode: "expanding",
       calibration: true,
-      deposit: { dca: 500, linear: 500, squared: 500 },
+      // Funding mode + fair-comparison controls: startingCapital and
+      // reserveRateAnnual are GLOBAL — applied identically to every
+      // strategy, DCA included — so a comparison is never accidentally
+      // stacking "more capital" on top of "better timing." Only
+      // lumpSumAtStart (per strategy, below) controls whether each
+      // strategy's share of it is deployed immediately or held as reserve.
+      fundingMode: "strict",
+      startingCapital: 0,
+      reserveRateAnnual: 0, // percent, e.g. 2 == 2%/yr
+      deposit: { dca: 500, linear: 500, squared: 500, threshold: 500 },
       bounds: {
         linear: { mMin: 0.0, mMax: 3.0 },
         squared: { mMin: 0.0, mMax: 3.0 },
+        threshold: { mMin: 0.0, mMax: 3.0 },
       },
-      optimizer: { strategy: "linear", objective: "btcAccumulated" },
+      // Reduced deployment is expressed as a target ratio the calibration
+      // constant is solved for (k = targetDeployment / median(rawRatio)),
+      // never as a smaller deposit — the deposit stays identical across
+      // strategies so the comparison stays a timing comparison, not a
+      // savings-rate one. DCA's own p=0 ignores this by construction.
+      targetDeployment: { linear: 1.0, squared: 1.0 },
+      // DCA deploys any starting capital immediately by default (that's
+      // what "just DCA it all in" means); the power-law strategies hold it
+      // as reserve by default, since the whole point of those strategies is
+      // choosing *when* to deploy.
+      lumpSumAtStart: { dca: true, linear: false, squared: false, threshold: false },
+      // Threshold reserve strategy — present but OFF by default. Below
+      // enterThreshold it buys a slow baseRate share of deposit (building
+      // reserve); at/above it, it buys deposit plus a reserveSpendFraction
+      // slice of whatever reserve has built up.
+      threshold: {
+        enabled: false,
+        enterThreshold: 1.3,
+        baseRate: 0.6,
+        reserveSpendFraction: 0.25,
+        useBand: false,
+        bandSigma: 1,
+      },
+      optimizer: { strategy: "linear", objective: "btcAccumulated", targetDeployment: 1.0 },
     };
   }
 
@@ -102,13 +135,18 @@
     try {
       const json = decodeURIComponent(escape(atob(hash)));
       const parsed = JSON.parse(json);
-      return Object.assign(defaultState(), parsed, {
-        deposit: Object.assign(defaultState().deposit, parsed.deposit),
+      const def = defaultState();
+      return Object.assign(def, parsed, {
+        deposit: Object.assign(def.deposit, parsed.deposit),
         bounds: {
-          linear: Object.assign(defaultState().bounds.linear, parsed.bounds && parsed.bounds.linear),
-          squared: Object.assign(defaultState().bounds.squared, parsed.bounds && parsed.bounds.squared),
+          linear: Object.assign(def.bounds.linear, parsed.bounds && parsed.bounds.linear),
+          squared: Object.assign(def.bounds.squared, parsed.bounds && parsed.bounds.squared),
+          threshold: Object.assign(def.bounds.threshold, parsed.bounds && parsed.bounds.threshold),
         },
-        optimizer: Object.assign(defaultState().optimizer, parsed.optimizer),
+        targetDeployment: Object.assign(def.targetDeployment, parsed.targetDeployment),
+        lumpSumAtStart: Object.assign(def.lumpSumAtStart, parsed.lumpSumAtStart),
+        threshold: Object.assign(def.threshold, parsed.threshold),
+        optimizer: Object.assign(def.optimizer, parsed.optimizer),
       });
     } catch (e) {
       return null;
@@ -137,15 +175,49 @@
     el("endDate").value = formatDMY(state.endDate);
     el("fitMode").value = state.fitMode;
     el("calibration").checked = state.calibration;
+    el("fundingMode").value = state.fundingMode;
+    el("startingCapital").value = state.startingCapital;
+    el("reserveRateAnnual").value = state.reserveRateAnnual;
     el("depositDca").value = state.deposit.dca;
     el("depositLinear").value = state.deposit.linear;
     el("depositSquared").value = state.deposit.squared;
+    el("depositThreshold").value = state.deposit.threshold;
     el("mMinLinear").value = state.bounds.linear.mMin;
     el("mMaxLinear").value = state.bounds.linear.mMax;
     el("mMinSquared").value = state.bounds.squared.mMin;
     el("mMaxSquared").value = state.bounds.squared.mMax;
+    el("mMinThreshold").value = state.bounds.threshold.mMin;
+    el("mMaxThreshold").value = state.bounds.threshold.mMax;
+    el("targetDeploymentLinear").value = state.targetDeployment.linear;
+    el("targetDeploymentSquared").value = state.targetDeployment.squared;
+    el("lumpSumDca").checked = state.lumpSumAtStart.dca;
+    el("lumpSumLinear").checked = state.lumpSumAtStart.linear;
+    el("lumpSumSquared").checked = state.lumpSumAtStart.squared;
+    el("lumpSumThreshold").checked = state.lumpSumAtStart.threshold;
+    el("thresholdEnabled").checked = state.threshold.enabled;
+    el("thresholdEnterRatio").value = state.threshold.enterThreshold;
+    el("thresholdBaseRate").value = state.threshold.baseRate;
+    el("thresholdSpendFraction").value = state.threshold.reserveSpendFraction;
+    el("thresholdUseBand").checked = state.threshold.useBand;
+    el("thresholdBandSigma").value = state.threshold.bandSigma;
     el("optStrategy").value = state.optimizer.strategy === "squared" ? "2" : "1";
     el("optObjective").value = state.optimizer.objective;
+    el("optTargetDeployment").value = state.optimizer.targetDeployment;
+    updateThresholdOptionVisibility();
+  }
+
+  // The threshold strategy is off by default and only appears as a
+  // selectable 4th strategy elsewhere (trace table, benchmark picker) once
+  // enabled — an unrun, hidden strategy showing up in those pickers would
+  // be confusing and (for the benchmark picker) would throw when run.
+  function updateThresholdOptionVisibility() {
+    const enabled = state.threshold.enabled;
+    el("traceStrategyThresholdOpt").hidden = !enabled;
+    el("benchmarkStrategyThresholdOpt").hidden = !enabled;
+    if (!enabled) {
+      if (el("traceStrategy").value === "3") el("traceStrategy").value = "0";
+      if (el("benchmarkStrategy").value === "3") el("benchmarkStrategy").value = "1";
+    }
   }
 
   function clearDataError() {
@@ -194,29 +266,57 @@
     return ok;
   }
 
+  function clampedBounds(minId, maxId) {
+    let mMin = Number(el(minId).value);
+    let mMax = Number(el(maxId).value);
+    if (!Number.isFinite(mMin)) mMin = 0;
+    if (!Number.isFinite(mMax)) mMax = mMin;
+    if (mMin > mMax) [mMin, mMax] = [mMax, mMin];
+    return { mMin, mMax };
+  }
+
+  function clampTargetDeployment(v) {
+    v = Number(v);
+    if (!Number.isFinite(v)) return 1.0;
+    return B.clamp(v, 0.3, 1.0);
+  }
+
   function readNumericControls() {
     state.fitMode = el("fitMode").value;
     state.calibration = el("calibration").checked;
+    state.fundingMode = el("fundingMode").value;
+    state.startingCapital = Math.max(0, Number(el("startingCapital").value) || 0);
+    state.reserveRateAnnual = Number(el("reserveRateAnnual").value) || 0;
+
     state.deposit.dca = Math.max(0, Number(el("depositDca").value) || 0);
     state.deposit.linear = Math.max(0, Number(el("depositLinear").value) || 0);
     state.deposit.squared = Math.max(0, Number(el("depositSquared").value) || 0);
+    state.deposit.threshold = Math.max(0, Number(el("depositThreshold").value) || 0);
 
-    let mMinL = Number(el("mMinLinear").value);
-    let mMaxL = Number(el("mMaxLinear").value);
-    if (!Number.isFinite(mMinL)) mMinL = 0;
-    if (!Number.isFinite(mMaxL)) mMaxL = mMinL;
-    if (mMinL > mMaxL) [mMinL, mMaxL] = [mMaxL, mMinL];
-    state.bounds.linear = { mMin: mMinL, mMax: mMaxL };
+    state.bounds.linear = clampedBounds("mMinLinear", "mMaxLinear");
+    state.bounds.squared = clampedBounds("mMinSquared", "mMaxSquared");
+    state.bounds.threshold = clampedBounds("mMinThreshold", "mMaxThreshold");
 
-    let mMinS = Number(el("mMinSquared").value);
-    let mMaxS = Number(el("mMaxSquared").value);
-    if (!Number.isFinite(mMinS)) mMinS = 0;
-    if (!Number.isFinite(mMaxS)) mMaxS = mMinS;
-    if (mMinS > mMaxS) [mMinS, mMaxS] = [mMaxS, mMinS];
-    state.bounds.squared = { mMin: mMinS, mMax: mMaxS };
+    state.targetDeployment.linear = clampTargetDeployment(el("targetDeploymentLinear").value);
+    state.targetDeployment.squared = clampTargetDeployment(el("targetDeploymentSquared").value);
+
+    state.lumpSumAtStart.dca = el("lumpSumDca").checked;
+    state.lumpSumAtStart.linear = el("lumpSumLinear").checked;
+    state.lumpSumAtStart.squared = el("lumpSumSquared").checked;
+    state.lumpSumAtStart.threshold = el("lumpSumThreshold").checked;
+
+    state.threshold.enabled = el("thresholdEnabled").checked;
+    let enterRatio = Number(el("thresholdEnterRatio").value);
+    state.threshold.enterThreshold = Number.isFinite(enterRatio) && enterRatio > 0 ? enterRatio : 1.3;
+    state.threshold.baseRate = B.clamp(Number(el("thresholdBaseRate").value) || 0, 0, 1);
+    state.threshold.reserveSpendFraction = B.clamp(Number(el("thresholdSpendFraction").value) || 0, 0, 1);
+    state.threshold.useBand = el("thresholdUseBand").checked;
+    state.threshold.bandSigma = Math.max(0, Number(el("thresholdBandSigma").value) || 0);
+    updateThresholdOptionVisibility();
 
     state.optimizer.strategy = el("optStrategy").value === "2" ? "squared" : "linear";
     state.optimizer.objective = el("optObjective").value;
+    state.optimizer.targetDeployment = clampTargetDeployment(el("optTargetDeployment").value);
   }
 
   // ---------------------------------------------------------------------
@@ -224,8 +324,18 @@
   // ---------------------------------------------------------------------
 
   function buildStrategyDefs() {
-    return [
-      { key: "dca", label: "1 · DCA", color: COLOR.dca, p: 0, deposit: state.deposit.dca, mMin: 0, mMax: 1e9 },
+    const defs = [
+      {
+        key: "dca",
+        label: "1 · DCA",
+        color: COLOR.dca,
+        p: 0,
+        deposit: state.deposit.dca,
+        mMin: 0,
+        mMax: 1e9,
+        targetDeployment: 1,
+        lumpSumAtStart: state.lumpSumAtStart.dca,
+      },
       {
         key: "linear",
         label: "2 · Power-law linear",
@@ -234,6 +344,8 @@
         deposit: state.deposit.linear,
         mMin: state.bounds.linear.mMin,
         mMax: state.bounds.linear.mMax,
+        targetDeployment: state.targetDeployment.linear,
+        lumpSumAtStart: state.lumpSumAtStart.linear,
       },
       {
         key: "squared",
@@ -243,8 +355,31 @@
         deposit: state.deposit.squared,
         mMin: state.bounds.squared.mMin,
         mMax: state.bounds.squared.mMax,
+        targetDeployment: state.targetDeployment.squared,
+        lumpSumAtStart: state.lumpSumAtStart.squared,
       },
     ];
+    if (state.threshold.enabled) {
+      defs.push({
+        key: "threshold",
+        label: "4 · Threshold reserve",
+        color: COLOR.threshold,
+        p: 0, // unused by the threshold branch; keeps k/mRaw well-defined (1.000) in the trace
+        strategyType: "threshold",
+        deposit: state.deposit.threshold,
+        mMin: state.bounds.threshold.mMin,
+        mMax: state.bounds.threshold.mMax,
+        lumpSumAtStart: state.lumpSumAtStart.threshold,
+        threshold: {
+          enterThreshold: state.threshold.enterThreshold,
+          baseRate: state.threshold.baseRate,
+          reserveSpendFraction: state.threshold.reserveSpendFraction,
+          useBand: state.threshold.useBand,
+          bandSigma: state.threshold.bandSigma,
+        },
+      });
+    }
+    return defs;
   }
 
   function recompute() {
@@ -259,15 +394,32 @@
       return;
     }
 
+    const fundingOpts = {
+      fundingMode: state.fundingMode,
+      startingCapital: state.startingCapital,
+      reserveRateAnnual: state.reserveRateAnnual / 100,
+    };
+
     const defs = buildStrategyDefs();
     const strategies = defs.map((def) => {
-      const { trace, kMin, kMax } = B.runLedger(
-        DATA,
-        context,
-        { p: def.p, mMin: def.mMin, mMax: def.mMax, deposit: def.deposit, startingBalance: 0 },
-        state.calibration
-      );
-      const metrics = B.computeMetrics(DATA, trace, def.deposit, state.endDate);
+      const params = {
+        p: def.p,
+        mMin: def.mMin,
+        mMax: def.mMax,
+        deposit: def.deposit,
+        targetDeployment: def.targetDeployment,
+        strategyType: def.strategyType,
+        threshold: def.threshold,
+        fundingMode: fundingOpts.fundingMode,
+        startingCapital: fundingOpts.startingCapital,
+        reserveRateAnnual: fundingOpts.reserveRateAnnual,
+        lumpSumAtStart: def.lumpSumAtStart,
+      };
+      const { trace, kMin, kMax, result } = B.runLedger(DATA, context, params, state.calibration);
+      const metrics = B.computeMetrics(DATA, trace, def.deposit, state.endDate, {
+        ledgerResult: result,
+        startingCapital: fundingOpts.startingCapital,
+      });
       return { ...def, trace, metrics, kMin, kMax };
     });
 
@@ -276,7 +428,10 @@
       s.comparison = B.compareToBaseline(s.metrics, baseline.metrics);
     }
 
-    lastResults = { context, strategies, baseline };
+    const committed = strategies.map((s) => s.metrics.totalCommitted);
+    const committedMismatch = !committed.every((c) => Math.abs(c - committed[0]) < 0.005);
+
+    lastResults = { context, strategies, baseline, fundingOpts, committedMismatch };
     updateHash();
     renderAll();
   }
@@ -286,6 +441,9 @@
   // ---------------------------------------------------------------------
 
   function renderAll() {
+    const unbound = !!lastResults && lastResults.fundingOpts.fundingMode === "unbound";
+    el("unboundBanner").hidden = !unbound;
+    document.body.classList.toggle("diagnostic-mode", unbound);
     renderResultsTable();
     renderPriceChart();
     renderValueChart();
@@ -304,15 +462,14 @@
       table.innerHTML = "";
       return;
     }
-    const { strategies } = lastResults;
+    const { strategies, committedMismatch } = lastResults;
 
-    const deposits = strategies.map((s) => s.deposit);
-    const equalDeposits = deposits.every((d) => d === deposits[0]);
-    el("unequalDepositsHint").hidden = equalDeposits;
+    el("committedMismatchHint").hidden = !committedMismatch;
 
     let html = `<thead><tr><th>Metric</th>${strategies.map((s) => `<th style="color:${s.color}">${s.label}</th>`).join("")}</tr></thead><tbody>`;
 
     html += metricRow("Total deposited", strategies.map((s) => fmtUsd(s.metrics.deposited)));
+    html += metricRow("Total committed (incl. starting capital)", strategies.map((s) => fmtUsd(s.metrics.totalCommitted)));
     html += metricRow("Total invested", strategies.map((s) => fmtUsd(s.metrics.invested)));
     html += metricRow("Deployment rate", strategies.map((s) => fmtPct(s.metrics.deploymentRate)));
     html += metricRow("Cash left", strategies.map((s) => fmtUsd(s.metrics.cashLeft)));
@@ -321,8 +478,8 @@
     html += metricRow("BTC value at end", strategies.map((s) => fmtUsd(s.metrics.btcValue)));
     html += metricRow("Total value", strategies.map((s) => fmtUsd(s.metrics.totalValue)));
     html += metricRow("MoIC (on invested)", strategies.map((s) => fmtX(s.metrics.moicOnInvested)));
-    html += metricRow("MoIC (on deposited)", strategies.map((s) => fmtX(s.metrics.moicOnDeposited)));
-    html += metricRow("XIRR", strategies.map((s) => fmtPct(s.metrics.xirr)));
+    html += metricRow("MoIC (on committed)", strategies.map((s) => fmtX(s.metrics.moicOnCommitted)));
+    html += metricRow("XIRR (incl. starting capital at t0)", strategies.map((s) => fmtPct(s.metrics.xirr)));
     html += metricRow(
       "Starved months",
       strategies.map((s) => `${s.metrics.starvedMonths} (${fmtPct(s.metrics.starvedMonthsPct, 1)})`)
@@ -337,31 +494,35 @@
     if (state.calibration) {
       html += metricRow(
         "k used (range)",
-        strategies.map((s) => (s.p === 0 ? "1.000" : `${fmtNum(s.kMin, 3)} – ${fmtNum(s.kMax, 3)}`))
+        strategies.map((s) => (s.strategyType === "threshold" || s.p === 0 ? "n/a" : `${fmtNum(s.kMin, 3)} – ${fmtNum(s.kMax, 3)}`))
       );
     }
 
     html += `<tr><td colspan="${strategies.length + 1}" style="padding-top:0.9rem; color:var(--muted); font-family:var(--sans); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em;">vs. strategy 1 (DCA baseline)</td></tr>`;
-    html += metricRow(
-      "Δ BTC accumulated",
-      strategies.map((s) => (s === lastResults.baseline ? "—" : fmtPct(s.comparison.deltaBtcPct)))
-    );
-    html += metricRow(
-      "Δ total value",
-      strategies.map((s) =>
-        s === lastResults.baseline ? "—" : `${fmtUsd(s.comparison.deltaTotalValue)} (${fmtPct(s.comparison.deltaTotalValuePct)})`
-      )
-    );
-    html += metricRow(
-      "Δ XIRR",
-      strategies.map((s) =>
-        s === lastResults.baseline
-          ? "—"
-          : s.comparison.deltaXirrPts == null
-          ? "—"
-          : (s.comparison.deltaXirrPts >= 0 ? "+" : "") + fmtNum(s.comparison.deltaXirrPts * 100, 2) + " pp"
-      )
-    );
+    if (committedMismatch) {
+      html += `<tr><td colspan="${strategies.length + 1}" style="color:var(--red); font-family:var(--sans); font-size:0.8rem;">Total committed capital differs between strategies (see row above) — deltas withheld, not shown as a comparison.</td></tr>`;
+    } else {
+      html += metricRow(
+        "Δ BTC accumulated",
+        strategies.map((s) => (s === lastResults.baseline ? "—" : fmtPct(s.comparison.deltaBtcPct)))
+      );
+      html += metricRow(
+        "Δ total value",
+        strategies.map((s) =>
+          s === lastResults.baseline ? "—" : `${fmtUsd(s.comparison.deltaTotalValue)} (${fmtPct(s.comparison.deltaTotalValuePct)})`
+        )
+      );
+      html += metricRow(
+        "Δ XIRR",
+        strategies.map((s) =>
+          s === lastResults.baseline
+            ? "—"
+            : s.comparison.deltaXirrPts == null
+            ? "—"
+            : (s.comparison.deltaXirrPts >= 0 ? "+" : "") + fmtNum(s.comparison.deltaXirrPts * 100, 2) + " pp"
+        )
+      );
+    }
 
     html += "</tbody>";
     table.innerHTML = html;
@@ -568,6 +729,12 @@
     if (!validateDates()) return;
     readNumericControls();
 
+    if (state.fundingMode === "unbound") {
+      el("optimizerUnboundWarning").hidden = false;
+      return;
+    }
+    el("optimizerUnboundWarning").hidden = true;
+
     const strategyKey = state.optimizer.strategy;
     const p = strategyKey === "squared" ? 2 : 1;
     const opts = {
@@ -575,7 +742,11 @@
       startDate: state.startDate,
       endDate: state.endDate,
       deposit: state.deposit[strategyKey],
-      startingBalance: 0,
+      targetDeployment: state.optimizer.targetDeployment,
+      fundingMode: state.fundingMode,
+      startingCapital: state.startingCapital,
+      reserveRateAnnual: state.reserveRateAnnual / 100,
+      lumpSumAtStart: state.lumpSumAtStart[strategyKey],
       fitMode: state.fitMode,
       calibrationOn: state.calibration,
       objective: state.optimizer.objective,
@@ -750,17 +921,36 @@
     "endDate",
     "fitMode",
     "calibration",
+    "fundingMode",
+    "startingCapital",
+    "reserveRateAnnual",
     "depositDca",
     "depositLinear",
     "depositSquared",
+    "depositThreshold",
     "mMinLinear",
     "mMaxLinear",
     "mMinSquared",
     "mMaxSquared",
+    "mMinThreshold",
+    "mMaxThreshold",
+    "targetDeploymentLinear",
+    "targetDeploymentSquared",
+    "lumpSumDca",
+    "lumpSumLinear",
+    "lumpSumSquared",
+    "lumpSumThreshold",
+    "thresholdEnabled",
+    "thresholdEnterRatio",
+    "thresholdBaseRate",
+    "thresholdSpendFraction",
+    "thresholdUseBand",
+    "thresholdBandSigma",
     "resetBtn",
     "runOptimizerBtn",
     "runBenchmarkBtn",
     "runRollingBtn",
+    "runSweepBtn",
   ];
 
   function disableBacktestControls(message) {
@@ -879,7 +1069,26 @@
   let allocationChartHandle = null;
 
   function currentBenchmarkStrategy() {
-    const key = el("benchmarkStrategy").value === "2" ? "squared" : "linear";
+    const val = el("benchmarkStrategy").value;
+    if (val === "3" && state.threshold.enabled) {
+      return {
+        key: "threshold",
+        name: "4 · Threshold reserve",
+        strategyType: "threshold",
+        mMin: state.bounds.threshold.mMin,
+        mMax: state.bounds.threshold.mMax,
+        deposit: state.deposit.threshold,
+        lumpSumAtStart: state.lumpSumAtStart.threshold,
+        threshold: {
+          enterThreshold: state.threshold.enterThreshold,
+          baseRate: state.threshold.baseRate,
+          reserveSpendFraction: state.threshold.reserveSpendFraction,
+          useBand: state.threshold.useBand,
+          bandSigma: state.threshold.bandSigma,
+        },
+      };
+    }
+    const key = val === "2" ? "squared" : "linear";
     return {
       key,
       name: key === "linear" ? "2 · Power-law linear" : "3 · Power-law squared",
@@ -887,6 +1096,8 @@
       mMin: state.bounds[key].mMin,
       mMax: state.bounds[key].mMax,
       deposit: state.deposit[key],
+      targetDeployment: state.targetDeployment[key],
+      lumpSumAtStart: state.lumpSumAtStart[key],
     };
   }
 
@@ -901,7 +1112,28 @@
       deposit: strat.deposit,
       fitMode: state.fitMode,
       calibrate: state.calibration,
-      strategies: [{ name: strat.name, exponent: strat.exponent, mMin: strat.mMin, mMax: strat.mMax }],
+      fundingMode: state.fundingMode,
+      startingCapital: state.startingCapital,
+      reserveRateAnnual: state.reserveRateAnnual / 100,
+      strategies: [
+        strat.strategyType === "threshold"
+          ? {
+              name: strat.name,
+              strategyType: "threshold",
+              mMin: strat.mMin,
+              mMax: strat.mMax,
+              threshold: strat.threshold,
+              lumpSumAtStart: strat.lumpSumAtStart,
+            }
+          : {
+              name: strat.name,
+              exponent: strat.exponent,
+              mMin: strat.mMin,
+              mMax: strat.mMax,
+              targetDeployment: strat.targetDeployment,
+              lumpSumAtStart: strat.lumpSumAtStart,
+            },
+      ],
     };
 
     let suite;
@@ -916,6 +1148,7 @@
     renderBenchmarkHeadline(suite, strat);
     renderAllocationChart(suite, strat);
     renderPermutationChart(suite);
+    renderDiagnosticsTable(suite);
   }
 
   function renderBenchmarkHeadline(suite, strat) {
@@ -949,7 +1182,7 @@
       Array.from(suite.ceiling.spendAt),
       Array.from(r.run.spendTrace),
       Array.from(suite.prices),
-      { color: strat.key === "squared" ? COLOR.squared : COLOR.linear, height: 220 }
+      { color: COLOR[strat.key] || COLOR.linear, height: 220 }
     );
   }
 
@@ -963,6 +1196,171 @@
     el("permutationCaption").textContent =
       `The real chronological ordering beat ${fmtNum(perm.percentile, 1)}% of ${perm.nullBtc.length} shuffled orderings ` +
       `of the same multipliers (p ≈ ${fmtNum(perm.pValue, 4)}). Orange marker is the observed result.`;
+  }
+
+  // Real-vs-shuffled: same multipliers, only the month assignment shuffled.
+  // If starved months / invested / deployment rate barely move but BTC does,
+  // the edge is genuinely about timing. If they move together, part of the
+  // "edge" is the funding constraint interacting differently with a
+  // different month ordering, not a timing signal.
+  function renderDiagnosticsTable(suite) {
+    const r = suite.results[0];
+    const perm = r.permutation;
+    const rows = [
+      ["Starved months", String(perm.observedStarvedMonths), fmtNum(perm.nullMeanStarvedMonths, 1)],
+      ["Total invested", fmtUsd(perm.observedInvested), fmtUsd(perm.nullMeanInvested)],
+      ["Deployment rate", fmtPct(perm.observedDeploymentRate), fmtPct(perm.nullMeanDeploymentRate)],
+      ["BTC accumulated", fmtBtc(perm.observedBtc), fmtBtc(perm.nullMean)],
+    ];
+    let html = "<thead><tr><th>Metric</th><th>Real (chronological)</th><th>Shuffled (mean of nulls)</th></tr></thead><tbody>";
+    for (const [label, real, shuf] of rows) html += `<tr><td>${label}</td><td>${real}</td><td>${shuf}</td></tr>`;
+    html += "</tbody>";
+    el("diagnosticsTable").innerHTML = html;
+
+    const dcaBtc = suite.dca.btc;
+    el("diagnosticsInterpretation").textContent =
+      perm.nullMean >= dcaBtc
+        ? `Even the average shuffled run (${fmtBtc(perm.nullMean)} BTC) accumulates at least as much BTC as plain DCA ` +
+          `(${fmtBtc(dcaBtc)} BTC) — the multiplier's sheer size, not its timing, is what beats DCA here.`
+        : `The average shuffled run (${fmtBtc(perm.nullMean)} BTC) accumulates less BTC than plain DCA ` +
+          `(${fmtBtc(dcaBtc)} BTC) — so whatever edge this strategy shows over DCA has to come from timing, since ` +
+          `randomizing the timing away erases it.`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Deployment-ratio sweep (see the "what to run first" workflow in README):
+  // under strict funding, sweep targetDeployment 1.0 -> 0.5 for the
+  // benchmarked strategy and watch the permutation p-value, not the return.
+  // ---------------------------------------------------------------------
+
+  const SWEEP_RATIOS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5];
+
+  function runDeploymentSweep() {
+    if (!validateDates()) return;
+    readNumericControls();
+    const strat = currentBenchmarkStrategy();
+    if (strat.strategyType === "threshold") {
+      showDataError("The deployment-ratio sweep applies to the power-law strategies (target deployment); the threshold strategy has no such dial.");
+      return;
+    }
+
+    let context;
+    try {
+      context = B.prepareFairValueContext(DATA, state.startDate, state.endDate, state.fitMode);
+    } catch (err) {
+      showDataError(err.message);
+      return;
+    }
+    clearDataError();
+
+    const fundingOpts = {
+      fundingMode: state.fundingMode,
+      startingCapital: state.startingCapital,
+      reserveRateAnnual: state.reserveRateAnnual / 100,
+    };
+
+    const rows = SWEEP_RATIOS.map((td) => {
+      const params = { p: strat.exponent, mMin: strat.mMin, mMax: strat.mMax, deposit: strat.deposit, targetDeployment: td };
+      const series = B.computeMultiplierSeries(DATA, context, params, state.calibration, fundingOpts);
+      const perm = Benchmarks.permutationTest(series.prices, series.multipliers, strat.deposit, undefined, undefined, fundingOpts);
+      return { targetDeployment: td, pValue: perm.pValue, observedBtc: perm.observedBtc, nullMean: perm.nullMean };
+    });
+
+    const base = rows[0].observedBtc;
+    for (const r of rows) r.deltaBtcPct = base > 0 ? ((r.observedBtc - base) / base) * 100 : null;
+
+    el("sweepResults").hidden = false;
+    renderSweepChart(rows);
+    let html =
+      "<thead><tr><th>Target deployment</th><th>p-value</th><th>BTC accumulated</th><th>Δ BTC vs. td=1.0</th><th>Null mean BTC</th></tr></thead><tbody>";
+    for (const r of rows) {
+      html += `<tr>
+        <td>${fmtNum(r.targetDeployment, 2)}</td>
+        <td>${fmtNum(r.pValue, 4)}</td>
+        <td>${fmtBtc(r.observedBtc)}</td>
+        <td>${r.deltaBtcPct == null ? "—" : fmtNum(r.deltaBtcPct, 1) + "%"}</td>
+        <td>${fmtBtc(r.nullMean)}</td>
+      </tr>`;
+    }
+    html += "</tbody>";
+    el("sweepTable").innerHTML = html;
+  }
+
+  // Minimal hand-rolled line chart (no uPlot dependency — the x-axis here is
+  // a dial from 1.0 to 0.5, not a time series, so uPlot's date-scaled x axis
+  // doesn't fit). Orange = p-value (left axis, 0-1). Teal = BTC accumulated
+  // (right axis, its own min/max range, annotated in the corner).
+  function renderSweepChart(rows) {
+    const container = el("sweepChart");
+    container.innerHTML = "";
+    const width = container.clientWidth || 600;
+    const height = 220;
+    const dpr = window.devicePixelRatio || 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+    container.appendChild(canvas);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+
+    const padL = 46;
+    const padR = 46;
+    const padT = 16;
+    const padB = 28;
+    const plotW = width - padL - padR;
+    const plotH = height - padT - padB;
+
+    const xs = rows.map((r) => r.targetDeployment);
+    const xMin = Math.min(...xs);
+    const xMax = Math.max(...xs);
+    const xToPx = (x) => padL + (xMax === xMin ? plotW / 2 : ((x - xMin) / (xMax - xMin)) * plotW);
+    const pToPx = (p) => padT + plotH - p * plotH;
+    const btcs = rows.map((r) => r.observedBtc);
+    const btcMin = Math.min(...btcs);
+    const btcMax = Math.max(...btcs);
+    const btcToPx = (b) => padT + plotH - (btcMax === btcMin ? plotH / 2 : ((b - btcMin) / (btcMax - btcMin)) * plotH);
+
+    ctx.strokeStyle = "#2a2c30";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    function drawLine(toPx, color, values) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      rows.forEach((r, i) => {
+        const x = xToPx(r.targetDeployment);
+        const y = toPx(values[i]);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      rows.forEach((r, i) => {
+        const x = xToPx(r.targetDeployment);
+        const y = toPx(values[i]);
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      });
+    }
+    drawLine(pToPx, COLOR.linear, rows.map((r) => r.pValue));
+    drawLine(btcToPx, COLOR.squared, btcs);
+
+    ctx.fillStyle = "#9a9ba0";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "center";
+    for (const r of rows) ctx.fillText(r.targetDeployment.toFixed(2), xToPx(r.targetDeployment), height - 8);
+    ctx.textAlign = "right";
+    ctx.fillText("p=1.0", padL - 6, padT + 10);
+    ctx.fillText("p=0.0", padL - 6, padT + plotH);
+    ctx.textAlign = "left";
+    ctx.fillStyle = COLOR.linear;
+    ctx.fillText("orange = p-value (left, 0–1)", padL + 4, padT + 12);
+    ctx.fillStyle = COLOR.squared;
+    ctx.fillText(`teal = BTC accumulated (right, ${fmtBtc(btcMin)}–${fmtBtc(btcMax)})`, padL + 4, padT + 26);
   }
 
   // ---------------------------------------------------------------------
@@ -1110,13 +1508,31 @@
     [
       "fitMode",
       "calibration",
+      "fundingMode",
+      "startingCapital",
+      "reserveRateAnnual",
       "depositDca",
       "depositLinear",
       "depositSquared",
+      "depositThreshold",
       "mMinLinear",
       "mMaxLinear",
       "mMinSquared",
       "mMaxSquared",
+      "mMinThreshold",
+      "mMaxThreshold",
+      "targetDeploymentLinear",
+      "targetDeploymentSquared",
+      "lumpSumDca",
+      "lumpSumLinear",
+      "lumpSumSquared",
+      "lumpSumThreshold",
+      "thresholdEnabled",
+      "thresholdEnterRatio",
+      "thresholdBaseRate",
+      "thresholdSpendFraction",
+      "thresholdUseBand",
+      "thresholdBandSigma",
     ].forEach((id) => {
       el(id).addEventListener("input", onControlsChanged);
       el(id).addEventListener("change", onControlsChanged);
@@ -1126,6 +1542,10 @@
       updateHash();
     });
     el("optObjective").addEventListener("change", () => {
+      readNumericControls();
+      updateHash();
+    });
+    el("optTargetDeployment").addEventListener("change", () => {
       readNumericControls();
       updateHash();
     });
@@ -1154,6 +1574,7 @@
     el("runOptimizerBtn").addEventListener("click", runOptimizer);
     el("runBenchmarkBtn").addEventListener("click", runBenchmarks);
     el("runRollingBtn").addEventListener("click", runRolling);
+    el("runSweepBtn").addEventListener("click", runDeploymentSweep);
 
     el("downloadCsvBtn").addEventListener("click", () => {
       if (!lastResults) return;

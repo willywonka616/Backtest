@@ -104,6 +104,60 @@ the window *count* overstates how much independent evidence there is — the pan
 available history regardless of whatever period is selected for the main backtest above, since
 the point is to see how the result varies across different historical regimes.
 
+## Funding modes and fair comparison
+
+By default every strategy funds itself from its own reserve, which starts at $0 and can never go
+negative (**strict**). Two other modes exist:
+
+- **Seeded** — same rule (spend = min(desired, balance), balance ≥ 0), but the reserve starts at
+  the global starting capital instead of $0.
+- **Unbound** — spends the full desired amount every month regardless of balance, letting the
+  reserve go negative (i.e. borrows). This is a **diagnostic only, never a runnable strategy** —
+  the UI shows an amber banner, mutes the results, and the optimizer refuses to run under it. Its
+  purpose is separating two different explanations for a weak result: run the same strategy under
+  strict and unbound funding and compare the permutation p-value (Section 08) — if it's still
+  insignificant under unbound (no funding constraint at all), the multiplier's *shape* isn't
+  producing a timing edge; if it only becomes significant under unbound, the funding constraint
+  was suppressing a real signal.
+
+**Starting capital** and the **yield on reserve** (an annual rate credited to whatever's sitting
+unspent, compounded monthly, default 0%) are global controls — applied identically to every
+strategy, DCA included, so the comparison never accidentally stacks "more capital" on top of
+"better timing." Each strategy has its own **"deploy starting capital immediately"** toggle:
+checked, its share of the starting capital buys BTC at t0 outside the reserve entirely; unchecked,
+it's held as reserve like any other cash. DCA defaults to immediate deployment; the power-law
+strategies default to holding it, since choosing *when* to deploy is the whole point of those
+strategies.
+
+A reduced deployment level is expressed as a **target deployment ratio** (0.3–1.0, default 1.0,
+per strategy), never as a smaller deposit — the deposit stays identical across strategies so the
+comparison stays about timing, not savings rate. It works by changing what the calibration
+constant solves for: `k = targetDeployment / median(rawRatio)` instead of `k = 1 / median(rawRatio)`.
+**Total committed capital** (`startingCapital + deposit × months`) is shown in the results table for
+every strategy; if it differs between strategies being compared, the "vs. DCA" delta rows are
+withheld rather than shown as a comparison, since a delta is only meaningful when every strategy
+put in the same amount. XIRR and MoIC include starting capital as an outflow at t0.
+
+**What to run first:** under strict funding, take the squared strategy and sweep target deployment
+from 1.0 down to 0.5 (Section 08b). Watch the permutation **p-value**, not the return. If p stays
+high throughout the sweep, the multiplier's shape isn't producing a timing edge at any deployment
+level. If p drops sharply only as target deployment falls (i.e. only once the strategy is starved
+of capital relative to its desired spend), the *funding constraint* — not the model — was doing
+the work.
+
+## The threshold reserve strategy
+
+A fourth, optional strategy (off by default): instead of a continuous power-law multiplier, it
+switches between two fixed behaviors based on whether price is currently in a "deep value" zone.
+Below the enter threshold (fair/price ratio, default 1.3 — or, if the "±σ residual band" option is
+checked, `exp(bandSigma · σ)` where σ is the trailing no-lookahead residual stdev for that year) it
+buys a slow `baseRate × deposit` (default 0.6×, building reserve); at or above it, it buys
+`deposit + reserveSpendFraction × balance` (default 0.25× whatever reserve has accumulated). Unlike
+the power-law multiplier, this rule depends on the running reserve balance, so it can't be
+precomputed as a stateless function of price alone — it runs its own forward pass mirroring the
+shared ledger's exact balance mechanics, then flows through everything else (permutation test,
+rolling windows, benchmarks) exactly like any other strategy from that point on.
+
 ## Assumptions and limitations
 
 - **USD only.** The power law is a USD-denominated relationship; converting results to another
@@ -128,7 +182,11 @@ recovery on synthetic data, XIRR sanity, the no-lookahead guarantee of the expan
 agreement between `Backtest.runLedger` and the shared `Benchmarks.simulateLedger` (there is
 exactly one implementation of the ledger arithmetic — two would drift apart and quietly
 invalidate every comparison the app makes), the ceiling/floor bracketing DCA, the permutation
-test's degenerate case, and the data-verification helpers.
+test's degenerate case, the data-verification helpers, the `targetDeployment` calibration
+identity, `lumpSumAtStart` conservation (same total committed, different deployment timing), the
+threshold strategy's baseRate/reserve-fraction shape on a hand-worked synthetic series, unbound
+funding's ability to go into debt versus strict/seeded never doing so, and `computeMetrics`
+folding starting capital into `totalCommitted` and the XIRR t0 outflow.
 
 ## Repository layout
 

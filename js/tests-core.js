@@ -307,6 +307,118 @@
       assert(shape.kurtosis < 6, `expected near-normal kurtosis (~3) for i.i.d. Gaussian returns, got ${shape.kurtosis}`);
     });
 
+    // 16. targetDeployment generalizes the calibration identity: the median
+    // of k * ratio^p lands on targetDeployment, not just on 1 — this is how
+    // a reduced-deployment strategy is expressed (never as a smaller
+    // deposit).
+    check("16. calibrationConstant median identity generalizes to targetDeployment", (assert) => {
+      const fair = [50, 80, 120, 30, 200, 60, 90, 110, 40, 70];
+      const prices = new Array(10).fill(100);
+      for (const td of [1, 0.7, 0.5]) {
+        const exponent = 1;
+        const k = BM.calibrationConstant(fair, prices, exponent, null, td);
+        const scaled = fair.map((f, i) => k * Math.pow(f / prices[i], exponent)).sort((a, b) => a - b);
+        const mid = Math.floor(scaled.length / 2);
+        const med = scaled.length % 2 === 0 ? (scaled[mid - 1] + scaled[mid]) / 2 : scaled[mid];
+        assert(approxEqual(med, td, 1e-9), `targetDeployment=${td}: expected median ${td}, got ${med}`);
+      }
+    });
+
+    // 17. lumpSumAtStart changes WHEN starting capital is deployed (t0 vs.
+    // held as reserve), never HOW MUCH was committed — totalCommitted must
+    // match either way, and ledger conservation (invested + cashLeft ==
+    // totalCommitted) must hold in both cases.
+    check("17. lumpSumAtStart: same totalCommitted, different deployment timing", (assert) => {
+      const data = global.BTC_DATA;
+      const ctx = B.prepareFairValueContext(data, "2018-01-01", "2020-12-01", "expanding");
+      const base = { p: 2, mMin: 0, mMax: 4, deposit: 100, targetDeployment: 1, fundingMode: "seeded", startingCapital: 5000 };
+      const lump = B.runLedger(data, ctx, { ...base, lumpSumAtStart: true }, true);
+      const reserve = B.runLedger(data, ctx, { ...base, lumpSumAtStart: false }, true);
+      const mLump = B.computeMetrics(data, lump.trace, base.deposit, "2020-12-01", {
+        ledgerResult: lump.result,
+        startingCapital: base.startingCapital,
+      });
+      const mReserve = B.computeMetrics(data, reserve.trace, base.deposit, "2020-12-01", {
+        ledgerResult: reserve.result,
+        startingCapital: base.startingCapital,
+      });
+      assert(
+        approxEqual(mLump.totalCommitted, mReserve.totalCommitted, 1e-6),
+        `totalCommitted should match regardless of lumpSumAtStart: lump=${mLump.totalCommitted} reserve=${mReserve.totalCommitted}`
+      );
+      assert(
+        approxEqual(mLump.invested + mLump.cashLeft, mLump.totalCommitted, 1e-6),
+        `lump-sum conservation broken: invested+cashLeft=${mLump.invested + mLump.cashLeft} != totalCommitted=${mLump.totalCommitted}`
+      );
+      assert(
+        approxEqual(mReserve.invested + mReserve.cashLeft, mReserve.totalCommitted, 1e-6),
+        `held-reserve conservation broken: invested+cashLeft=${mReserve.invested + mReserve.cashLeft} != totalCommitted=${mReserve.totalCommitted}`
+      );
+      assert(
+        mLump.invested > mReserve.invested,
+        `lump-sum should convert more of the same committed capital to BTC immediately: lump invested=${mLump.invested} reserve invested=${mReserve.invested}`
+      );
+    });
+
+    // 18. Threshold strategy shape: below enterThreshold it buys baseRate x
+    // deposit (builds reserve); at/above it, it buys deposit plus
+    // reserveSpendFraction x balance. Worked by hand on a 2-month synthetic
+    // series (see the comment inline) so the expected multipliers are exact.
+    check("18. Threshold strategy buys baseRate below threshold, reserve fraction at/above", (assert) => {
+      const prices = [100, 100];
+      const fair = [50, 200]; // ratio fair/price = 0.5 (below), then 2.0 (above)
+      const deposit = 100;
+      const params = { enterThreshold: 1.0, baseRate: 0.6, reserveSpendFraction: 0.25, mMin: 0, mMax: 10 };
+      const mult = BM.computeThresholdMultiplierArray(prices, fair, deposit, params, { fundingMode: "strict" });
+      // t=0: balance 0 -> +100 deposit -> 100. ratio 0.5 < 1.0 -> desired = 100*0.6 = 60 -> m=0.6.
+      //      spend = min(60, 100) = 60 -> balance -> 40.
+      assert(approxEqual(mult[0], 0.6, 1e-9), `month 0: expected m=0.6 (baseRate), got ${mult[0]}`);
+      // t=1: balance 40 -> +100 deposit -> 140. ratio 2.0 >= 1.0 ->
+      //      desired = 100 + 0.25*140 = 135 -> m=1.35.
+      assert(approxEqual(mult[1], 1.35, 1e-9), `month 1: expected m=1.35 (reserve fraction), got ${mult[1]}`);
+    });
+
+    // 19. Unbound funding can go into debt (negative balance) to fully fund
+    // every desired purchase; strict/seeded never do — the balance floor at
+    // 0 (strict) or startingCapital-bounded-below (seeded, never negative
+    // either) is exactly what makes them runnable strategies and unbound a
+    // diagnostic only.
+    check("19. Unbound funding goes negative under heavy demand; strict/seeded never do", (assert) => {
+      const prices = [100, 100, 100];
+      const mult = [5, 5, 5]; // desired = 5x deposit, far more than any funding mode can sustainably cover
+      const deposit = 100;
+      const strict = BM.simulateLedger(prices, mult, deposit, { fundingMode: "strict" });
+      const seeded = BM.simulateLedger(prices, mult, deposit, { fundingMode: "seeded", startingCapital: 50 });
+      const unbound = BM.simulateLedger(prices, mult, deposit, { fundingMode: "unbound", startingCapital: 50 });
+      assert(strict.cashLeft >= -1e-9, `strict balance went negative: ${strict.cashLeft}`);
+      assert(seeded.cashLeft >= -1e-9, `seeded balance went negative: ${seeded.cashLeft}`);
+      assert(unbound.cashLeft < 0, `expected unbound to run into debt (negative balance), got ${unbound.cashLeft}`);
+      assert(unbound.starvedMonths === 0, `unbound should never be starved (spend=desired unconditionally), got ${unbound.starvedMonths}`);
+      assert(strict.starvedMonths > 0, `strict should be starved under demand this far beyond deposit, got ${strict.starvedMonths}`);
+    });
+
+    // 20. computeMetrics: totalCommitted includes startingCapital, and the
+    // XIRR t0 outflow actually reflects it (not just the deposit stream) —
+    // comparing against startingCapital=0 on the SAME trace isolates the
+    // effect of the t0 outflow itself.
+    check("20. computeMetrics folds startingCapital into totalCommitted and the XIRR t0 outflow", (assert) => {
+      const data = global.BTC_DATA;
+      const ctx = B.prepareFairValueContext(data, "2019-01-01", "2020-12-01", "expanding");
+      const params = { p: 0, mMin: 0, mMax: 3, deposit: 100, fundingMode: "seeded", startingCapital: 1000, lumpSumAtStart: true };
+      const { trace, result } = B.runLedger(data, ctx, params, false);
+      const months = trace.length;
+      const withStart = B.computeMetrics(data, trace, 100, "2020-12-01", { ledgerResult: result, startingCapital: 1000 });
+      const withoutStart = B.computeMetrics(data, trace, 100, "2020-12-01", { ledgerResult: result, startingCapital: 0 });
+      assert(
+        approxEqual(withStart.totalCommitted, 1000 + 100 * months, 1e-6),
+        `totalCommitted mismatch: expected ${1000 + 100 * months}, got ${withStart.totalCommitted}`
+      );
+      assert(
+        withStart.xirr !== withoutStart.xirr,
+        "XIRR should change when the startingCapital t0 outflow is included vs. omitted on the same trace"
+      );
+    });
+
     return results;
   }
 

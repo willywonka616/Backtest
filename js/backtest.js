@@ -107,19 +107,36 @@
     return { purchaseDates, extendedDates, plFairByDate };
   }
 
-  // k_year = 1 / median( (plFair(tau)/price(tau))^p ) over a trailing window
-  // of up to CALIB_WINDOW_MONTHS months strictly before Jan 1 of `year`,
-  // drawn only from extendedDates (data available at that time).
-  function computeKMap(data, context, p, calibrationOn) {
+  // k_year = targetDeployment / median( (plFair(tau)/price(tau))^p ) over a
+  // trailing window of up to CALIB_WINDOW_MONTHS months strictly before
+  // Jan 1 of `year`, drawn only from extendedDates (data available at that
+  // time). targetDeployment (default 1) generalizes the old "median == 1"
+  // identity to "median == targetDeployment" — how a reduced-deployment
+  // strategy is expressed, with deposit held identical across strategies.
+  // Ignored (k stays 1) at exponent 0, which is always the untouched DCA
+  // baseline regardless of any other strategy's dial.
+  //
+  // Also returns sigmaMap: the same trailing window's residual stdev
+  // (ln(price/plFair)) per year, for a threshold strategy's optional
+  // "below -bandSigma sigma" deep-value definition — computed here rather
+  // than in a fresh pass because it's the exact same window already being
+  // walked for k.
+  function computeKMap(data, context, p, calibrationOn, targetDeployment) {
+    targetDeployment = targetDeployment == null ? 1 : targetDeployment;
     if (!calibrationOn) {
       const years = new Set(context.purchaseDates.map(yearOf));
       const kMap = new Map();
-      for (const y of years) kMap.set(y, 1);
-      return { kMap, kMin: 1, kMax: 1 };
+      const sigmaMap = new Map();
+      for (const y of years) {
+        kMap.set(y, 1);
+        sigmaMap.set(y, 0);
+      }
+      return { kMap, kMin: 1, kMax: 1, sigmaMap };
     }
 
     const years = [...new Set(context.purchaseDates.map(yearOf))].sort((a, b) => a - b);
     const kMap = new Map();
+    const sigmaMap = new Map();
     let kMin = Infinity;
     let kMax = -Infinity;
 
@@ -127,6 +144,7 @@
       const yearStart = `${year}-01-01`;
       const windowStart = addMonths(yearStart, -CALIB_WINDOW_MONTHS);
       const ratios = [];
+      const residuals = [];
       for (const d of context.extendedDates) {
         if (d >= yearStart) break; // only data available before the recompute date
         if (d < windowStart) continue;
@@ -135,9 +153,11 @@
         if (!row || !price) continue;
         const ratio = row.plFair / price.price;
         ratios.push(Math.pow(ratio, p));
+        residuals.push(Math.log(price.price / row.plFair));
       }
-      const k = ratios.length > 0 ? 1 / median(ratios) : 1;
+      const k = p === 0 ? 1 : ratios.length > 0 ? targetDeployment / median(ratios) : targetDeployment;
       kMap.set(year, k);
+      sigmaMap.set(year, stdev(residuals));
     }
 
     // Track the k range actually applied to purchase months.
@@ -147,11 +167,11 @@
       if (k > kMax) kMax = k;
     }
     if (kMin === Infinity) {
-      kMin = 1;
-      kMax = 1;
+      kMin = targetDeployment;
+      kMax = targetDeployment;
     }
 
-    return { kMap, kMin, kMax };
+    return { kMap, kMin, kMax, sigmaMap };
   }
 
   function median(arr) {
@@ -162,15 +182,27 @@
     return n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
   }
 
+  function stdev(arr) {
+    const n = arr.length;
+    if (n === 0) return 0;
+    const mean = arr.reduce((a, b) => a + b, 0) / n;
+    return Math.sqrt(arr.reduce((a, b) => a + (b - mean) ** 2, 0) / n);
+  }
+
   // Computes the per-month multiplier decision for one strategy: the price,
   // power-law fair value, raw ratio, calibration k, and clamped multiplier
   // at every purchase date. Split out from runLedger so the actual money
   // arithmetic (spend/balance/btc) has exactly one implementation, shared
   // with the benchmark suite and the rolling-window study — see
   // Benchmarks.simulateLedger in js/benchmarks.js.
-  function computeMultiplierSeries(data, context, params, calibrationOn) {
-    const { p, mMin, mMax } = params;
-    const { kMap, kMin, kMax } = computeKMap(data, context, p, calibrationOn);
+  // params: { p, mMin, mMax, deposit, targetDeployment, strategyType,
+  //           threshold: {enterThreshold, baseRate, reserveSpendFraction, useBand, bandSigma} }
+  // fundingOpts (only consulted for a threshold strategy's own forward pass —
+  // see Benchmarks.computeThresholdMultiplierArray): { fundingMode, startingCapital, reserveRateAnnual }
+  function computeMultiplierSeries(data, context, params, calibrationOn, fundingOpts) {
+    fundingOpts = fundingOpts || {};
+    const { p, mMin, mMax, targetDeployment } = params;
+    const { kMap, kMin, kMax, sigmaMap } = computeKMap(data, context, p, calibrationOn, targetDeployment);
 
     const n = context.purchaseDates.length;
     const prices = new Float64Array(n);
@@ -178,7 +210,6 @@
     const plFairArr = new Float64Array(n);
     const mRawArr = new Float64Array(n);
     const kArr = new Float64Array(n);
-    const multipliers = new Float64Array(n);
 
     for (let i = 0; i < n; i++) {
       const t = context.purchaseDates[i];
@@ -192,27 +223,75 @@
 
       const mRaw = p === 0 ? 1 : Math.pow(plFair / price, p);
       const k = kMap.get(yearOf(t));
-      const m = clamp(k * mRaw, mMin, mMax);
 
       prices[i] = price;
       priceDatesUsed[i] = priceInfo.dateUsed;
       plFairArr[i] = plFair;
       mRawArr[i] = mRaw;
       kArr[i] = k;
-      multipliers[i] = m;
+    }
+
+    let multipliers;
+    if (params.strategyType === "threshold") {
+      // Stateful, balance-dependent rule — can't be a stateless .map() like
+      // the power-law formula, so it gets its own forward pass (mirroring
+      // simulateLedger's exact balance mechanics) that yields a concrete
+      // realized multiplier array. From that point on it flows through
+      // runLedger/simulateLedger/permutationTest exactly like a power-law
+      // strategy — see Benchmarks.computeThresholdMultiplierArray.
+      const th = params.threshold || {};
+      let enterThreshold = th.enterThreshold == null ? 1.3 : th.enterThreshold;
+      if (th.useBand) {
+        // No-lookahead residual band: each month's threshold uses that
+        // year's trailing sigma (computed alongside k in computeKMap), not a
+        // single whole-sample sigma.
+        const bandSigma = th.bandSigma == null ? 1 : th.bandSigma;
+        enterThreshold = context.purchaseDates.map((t) => Math.exp(bandSigma * (sigmaMap.get(yearOf(t)) || 0)));
+      }
+      multipliers = global.Benchmarks.computeThresholdMultiplierArray(
+        prices,
+        plFairArr,
+        params.deposit,
+        {
+          enterThreshold,
+          baseRate: th.baseRate == null ? 0.6 : th.baseRate,
+          reserveSpendFraction: th.reserveSpendFraction == null ? 0.25 : th.reserveSpendFraction,
+          mMin,
+          mMax,
+        },
+        fundingOpts
+      );
+    } else {
+      multipliers = new Float64Array(n);
+      for (let i = 0; i < n; i++) multipliers[i] = clamp(kArr[i] * mRawArr[i], mMin, mMax);
     }
 
     return { prices, priceDatesUsed, plFairArr, mRawArr, kArr, multipliers, kMin, kMax };
   }
 
   // Runs the per-month ledger loop for one strategy.
-  // params: { p, mMin, mMax, deposit, startingBalance }
-  // Returns { trace, kMin, kMax }.
+  // params: { p, mMin, mMax, deposit, targetDeployment, strategyType, threshold,
+  //           fundingMode, startingCapital, reserveRateAnnual, lumpSumAtStart }
+  // Returns { trace, kMin, kMax, result, fundingOpts, lumpSumAtStart }, where
+  // `result` is the raw ledger result (see Benchmarks.simulateLedger /
+  // runWithLumpSum) — computeMetrics uses it directly for invested/btc/
+  // cashLeft/totalValue so a lump-sum startingCapital (folded in at t=0,
+  // outside the per-month trace) is still counted correctly.
   function runLedger(data, context, params, calibrationOn) {
-    const series = computeMultiplierSeries(data, context, params, calibrationOn);
-    const result = global.Benchmarks.simulateLedger(series.prices, series.multipliers, params.deposit, {
-      startingBalance: params.startingBalance || 0,
-    });
+    const fundingOpts = {
+      fundingMode: params.fundingMode || "strict",
+      startingCapital: params.startingCapital || 0,
+      reserveRateAnnual: params.reserveRateAnnual || 0,
+    };
+    const series = computeMultiplierSeries(data, context, params, calibrationOn, fundingOpts);
+    const lumpSumAtStart = !!params.lumpSumAtStart;
+    const result = global.Benchmarks.runWithLumpSum(
+      series.prices,
+      series.multipliers,
+      params.deposit,
+      fundingOpts,
+      lumpSumAtStart
+    );
 
     const trace = context.purchaseDates.map((t, i) => ({
       date: t,
@@ -230,29 +309,50 @@
       starved: result.starvedTrace[i] === 1,
     }));
 
-    return { trace, kMin: series.kMin, kMax: series.kMax };
+    return { trace, kMin: series.kMin, kMax: series.kMax, result, fundingOpts, lumpSumAtStart };
   }
 
   // ---- Metrics ----------------------------------------------------------
 
-  function computeMetrics(data, trace, deposit, endDate) {
+  // opts.startingCapital: committed at t0 for every strategy alike (default 0).
+  // opts.ledgerResult: the raw result from runLedger (Benchmarks.simulateLedger /
+  //   runWithLumpSum). When given, invested/btc/cashLeft/totalValue come from it
+  //   directly rather than being re-summed from trace, which matters for a
+  //   lump-sum startingCapital: it's folded into btc/invested at t=0, outside
+  //   any month's per-month spend, so re-summing trace.spend would silently
+  //   drop it. Omit for the old trace-only behavior (still correct when there
+  //   is no startingCapital).
+  function computeMetrics(data, trace, deposit, endDate, opts) {
+    opts = opts || {};
+    const startingCapital = opts.startingCapital || 0;
+    const ledgerResult = opts.ledgerResult;
     const finalPrice = closeOn(data, endDate).price;
-    const deposited = deposit * trace.length;
-    const invested = sum(trace.map((r) => r.spend));
-    const cashLeft = trace.length ? trace[trace.length - 1].balance : 0;
-    const btc = trace.length ? trace[trace.length - 1].btc : 0;
+    const months = trace.length;
+    const deposited = deposit * months;
+    const totalCommitted = startingCapital + deposited;
+    const invested = ledgerResult ? ledgerResult.invested : sum(trace.map((r) => r.spend));
+    const cashLeft = ledgerResult ? ledgerResult.cashLeft : trace.length ? trace[trace.length - 1].balance : 0;
+    const btc = ledgerResult ? ledgerResult.btc : trace.length ? trace[trace.length - 1].btc : 0;
     const btcValue = btc * finalPrice;
-    const totalValue = btcValue + cashLeft;
+    const totalValue = ledgerResult ? ledgerResult.totalValue : btcValue + cashLeft;
     const starvedMonths = trace.filter((r) => r.starved).length;
     const unmetDemand = sum(trace.map((r) => Math.max(0, r.desired - r.spend)));
     const balances = trace.map((r) => r.balance);
 
-    const cashFlows = trace.map((r) => ({ date: r.date, amount: -deposit }));
+    // startingCapital is a t0 outflow for every strategy alike, whether it's
+    // deployed immediately (lumpSumAtStart) or held as reserve — the investor
+    // committed it at t0 either way; only when the strategy chose to spend it
+    // differs.
+    const cashFlows = trace.map((r, i) => ({
+      date: r.date,
+      amount: i === 0 ? -(deposit + startingCapital) : -deposit,
+    }));
     cashFlows.push({ date: endDate, amount: totalValue });
     const xirr = computeXIRR(cashFlows);
 
     return {
       deposited,
+      totalCommitted,
       invested,
       deploymentRate: deposited > 0 ? invested / deposited : null,
       cashLeft,
@@ -262,9 +362,10 @@
       totalValue,
       moicOnInvested: invested > 0 ? totalValue / invested : null,
       moicOnDeposited: deposited > 0 ? totalValue / deposited : null,
+      moicOnCommitted: totalCommitted > 0 ? totalValue / totalCommitted : null,
       xirr,
       starvedMonths,
-      starvedMonthsPct: trace.length ? starvedMonths / trace.length : 0,
+      starvedMonthsPct: months ? starvedMonths / months : 0,
       unmetDemand,
       unmetDemandPct: deposited > 0 ? unmetDemand / deposited : 0,
       reserveMax: balances.length ? Math.max(...balances) : 0,
@@ -373,6 +474,7 @@
     assertExpandingHistorySufficient,
     prepareFairValueContext,
     computeKMap,
+    computeMultiplierSeries,
     runLedger,
     computeMetrics,
     compareToBaseline,
