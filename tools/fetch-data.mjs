@@ -1,30 +1,23 @@
 #!/usr/bin/env node
-// Regenerates js/data.js with a daily BTC/USD close series.
-//
-// Sources, tried in order:
-//   1. CoinGecko market_chart API (primary, per spec)
-//   2. Coin Metrics community daily CSV (online fallback, long history)
-//   3. tools/btc-fallback.csv, a snapshot committed to this repo (offline-safe fallback)
-//
-// Any calendar day missing from the chosen source is forward-filled from the
-// previous day's close, and the number of filled days is logged.
+// Regenerates js/data.js with a daily BTC/USD close series from the Coin
+// Metrics v4 community API. Single source, no fallbacks: if the API call
+// fails, or the returned series has a gap or is stale, this exits(1) rather
+// than writing anything. Never substitutes or generates data.
 //
 // Usage: node tools/fetch-data.mjs
 
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_PATH = path.join(__dirname, "..", "js", "data.js");
-const FALLBACK_CSV_PATH = path.join(__dirname, "btc-fallback.csv");
 
-const COINGECKO_URL =
-  "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max&interval=daily";
 const COINMETRICS_URL =
-  "https://raw.githubusercontent.com/coinmetrics/data/master/csv/btc.csv";
+  "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD&frequency=1d&page_size=10000";
 
 const FETCH_TIMEOUT_MS = 20_000;
+const MAX_STALE_DAYS = 3;
 
 async function fetchWithTimeout(url, opts = {}) {
   const controller = new AbortController();
@@ -34,60 +27,6 @@ async function fetchWithTimeout(url, opts = {}) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-function toISODate(ms) {
-  return new Date(ms).toISOString().slice(0, 10);
-}
-
-// Returns a Map<"YYYY-MM-DD", number> or throws.
-async function fetchCoinGecko() {
-  const res = await fetchWithTimeout(COINGECKO_URL);
-  if (!res.ok) throw new Error(`CoinGecko HTTP ${res.status}`);
-  const json = await res.json();
-  const prices = json?.prices;
-  if (!Array.isArray(prices) || prices.length === 0) {
-    throw new Error("CoinGecko response missing prices[]");
-  }
-  const byDate = new Map();
-  for (const [ms, price] of prices) {
-    byDate.set(toISODate(ms), price);
-  }
-  return byDate;
-}
-
-// Returns a Map<"YYYY-MM-DD", number> or throws.
-async function fetchCoinMetrics() {
-  const res = await fetchWithTimeout(COINMETRICS_URL);
-  if (!res.ok) throw new Error(`Coin Metrics HTTP ${res.status}`);
-  const text = await res.text();
-  return parseDateCloseCsv(text, "time", "PriceUSD");
-}
-
-async function readFallbackCsv() {
-  const text = await readFile(FALLBACK_CSV_PATH, "utf8");
-  return parseDateCloseCsv(text, "date", "close");
-}
-
-function parseDateCloseCsv(text, dateCol, closeCol) {
-  const lines = text.trim().split("\n");
-  const header = lines[0].split(",");
-  const dateIdx = header.indexOf(dateCol);
-  const closeIdx = header.indexOf(closeCol);
-  if (dateIdx === -1 || closeIdx === -1) {
-    throw new Error(`CSV missing expected columns ${dateCol}/${closeCol}`);
-  }
-  const byDate = new Map();
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",");
-    const dateStr = cols[dateIdx];
-    const closeStr = cols[closeIdx];
-    if (!dateStr || !closeStr) continue;
-    const close = Number(closeStr);
-    if (!Number.isFinite(close)) continue;
-    byDate.set(dateStr.slice(0, 10), close);
-  }
-  return byDate;
 }
 
 function daysBetween(a, b) {
@@ -100,73 +39,109 @@ function parseISO(dateStr) {
   return new Date(Date.UTC(y, m - 1, d));
 }
 
-// Builds a contiguous daily closes[] array from a sparse Map, forward-filling gaps.
-function buildContiguousSeries(byDate) {
-  const dates = [...byDate.keys()].sort();
-  const startDate = dates[0];
-  const endDate = dates[dates.length - 1];
-  const start = parseISO(startDate);
-  const end = parseISO(endDate);
-  const totalDays = daysBetween(start, end) + 1;
+function roundClose(x) {
+  // Keep the file compact; price data does not need more than 6 significant fractional digits.
+  return Math.round(x * 1e6) / 1e6;
+}
 
-  const closes = new Array(totalDays);
-  let lastClose = byDate.get(startDate);
-  let filled = 0;
-  for (let i = 0; i < totalDays; i++) {
-    const cur = new Date(start.getTime() + i * 86_400_000);
-    const key = cur.toISOString().slice(0, 10);
-    if (byDate.has(key)) {
-      lastClose = byDate.get(key);
-    } else {
-      filled++;
+// Fetches the full asset-metrics series, following next_page_url until it's
+// absent. Returns Map<"YYYY-MM-DD", number>. Throws (with HTTP status + body)
+// on any non-OK response — the caller exits(1) rather than retrying or
+// substituting another source.
+async function fetchCoinMetrics() {
+  const byDate = new Map();
+  let url = COINMETRICS_URL;
+
+  while (url) {
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "<failed to read response body>");
+      throw new Error(`Coin Metrics HTTP ${res.status}\n${body}`);
     }
-    closes[i] = lastClose;
+    const json = await res.json();
+    const rows = json?.data;
+    if (!Array.isArray(rows)) {
+      throw new Error(`Coin Metrics response missing data[]: ${JSON.stringify(json).slice(0, 500)}`);
+    }
+    for (const row of rows) {
+      const price = Number(row.PriceUSD);
+      if (!row.time || !Number.isFinite(price)) continue;
+      byDate.set(String(row.time).slice(0, 10), price);
+    }
+    url = json.next_page_url || null;
   }
-  return { startDate, endDate, closes, filled };
+
+  if (byDate.size === 0) {
+    throw new Error("Coin Metrics returned zero rows");
+  }
+  return byDate;
+}
+
+// Hard guard: every consecutive pair of dates must be exactly 1 calendar day
+// apart. A gap here means the source is missing days — fail loudly rather
+// than forward-filling a synthesized price over the hole.
+function assertContiguous(dates) {
+  for (let i = 1; i < dates.length; i++) {
+    const gap = daysBetween(parseISO(dates[i - 1]), parseISO(dates[i]));
+    if (gap !== 1) {
+      console.error(
+        `Gap in Coin Metrics series: ${dates[i - 1]} -> ${dates[i]} is ${gap} day(s) apart, expected exactly 1.`
+      );
+      process.exit(1);
+    }
+  }
+}
+
+// Hard guard: the series must not be stale. This is what actually catches a
+// truncated/incomplete fetch — a silently-short series still "succeeds" as
+// an HTTP request.
+function assertFresh(lastDate) {
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const staleDays = daysBetween(parseISO(lastDate), today);
+  if (staleDays > MAX_STALE_DAYS) {
+    console.error(
+      `Coin Metrics series is stale: last date ${lastDate} is ${staleDays} day(s) before today ` +
+        `(${today.toISOString().slice(0, 10)}). Expected <= ${MAX_STALE_DAYS}.`
+    );
+    process.exit(1);
+  }
 }
 
 async function main() {
   let byDate;
-  let sourceName;
-
   try {
-    byDate = await fetchCoinGecko();
-    sourceName = "CoinGecko";
+    byDate = await fetchCoinMetrics();
   } catch (err) {
-    console.warn(`CoinGecko fetch failed (${err.message}), trying Coin Metrics...`);
-    try {
-      byDate = await fetchCoinMetrics();
-      sourceName = "Coin Metrics";
-    } catch (err2) {
-      console.warn(`Coin Metrics fetch failed (${err2.message}), using committed fallback CSV...`);
-      byDate = await readFallbackCsv();
-      sourceName = "committed fallback CSV";
-    }
+    console.error(`Coin Metrics fetch failed: ${err.message}`);
+    process.exit(1);
   }
 
-  const { startDate, endDate, closes, filled } = buildContiguousSeries(byDate);
+  const dates = [...byDate.keys()].sort();
+  assertContiguous(dates);
+  assertFresh(dates[dates.length - 1]);
+
+  const startDate = dates[0];
+  const endDate = dates[dates.length - 1];
+  const closes = dates.map((d) => roundClose(byDate.get(d)));
 
   const js =
-    `// Generated by tools/fetch-data.mjs from ${sourceName} on ${new Date().toISOString()}\n` +
+    `// Generated by tools/fetch-data.mjs from Coin Metrics on ${new Date().toISOString()}\n` +
     `// Do not hand-edit. Re-run \`node tools/fetch-data.mjs\` to refresh.\n` +
     `window.BTC_DATA = {\n` +
     `  startDate: ${JSON.stringify(startDate)},\n` +
-    `  source: ${JSON.stringify(sourceName)},\n` +
-    `  fillCount: ${filled}, // calendar days forward-filled from the previous close at fetch time\n` +
-    `  closes: [${closes.map((c) => roundClose(c)).join(",")}]\n` +
+    `  source: "Coin Metrics",\n` +
+    `  fillCount: 0, // guaranteed 0: assertContiguous above exits(1) rather than allowing a gap to reach here\n` +
+    `  closes: [${closes.join(",")}]\n` +
     `};\n`;
 
   await writeFile(OUT_PATH, js, "utf8");
 
-  console.log(`Source: ${sourceName}`);
-  console.log(`Range: ${startDate} .. ${endDate} (${closes.length} days, ${filled} forward-filled)`);
+  console.log(`First date: ${startDate}`);
+  console.log(`Last date: ${endDate}`);
   console.log(`Last close: ${closes[closes.length - 1]}`);
+  console.log(`Rows: ${closes.length}`);
   console.log(`Wrote ${OUT_PATH}`);
-}
-
-function roundClose(x) {
-  // Keep the file compact; price data does not need more than 6 significant fractional digits.
-  return Math.round(x * 1e6) / 1e6;
 }
 
 main().catch((err) => {
