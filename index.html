@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BTC Power-Law DCA Backtester</title>
+<link rel="stylesheet" href="js/vendor/uPlot.min.css" />
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0c0e;
+    --panel: #16171a;
+    --panel-alt: #1c1e22;
+    --border: #2a2c30;
+    --text: #e8e8e8;
+    --muted: #9a9ba0;
+    --orange: #f7931a;
+    --orange-dim: rgba(247, 147, 26, 0.15);
+    --teal: #4fb3a9;
+    --slate: #7a8ba6;
+    --green: #3ecf6e;
+    --red: #ef5350;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    margin: 0;
+    padding: 0 0 4rem;
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  a { color: var(--orange); }
+  h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; }
+  header.top {
+    padding: 1.5rem 1.25rem 1rem;
+    border-bottom: 1px solid var(--border);
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  header.top h1 { font-size: 1.3rem; margin: 0 0 0.2rem; }
+  header.top .accent { color: var(--orange); }
+  header.top p { margin: 0; color: var(--muted); font-size: 0.85rem; }
+  main { max-width: 1200px; margin: 0 auto; padding: 0 1.25rem; }
+  section { margin-top: 2rem; }
+  section > h2 {
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin: 0 0 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  section > h2 .n { color: var(--orange); font-family: var(--mono); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+  }
+  .chart-container { width: 100%; }
+  .chart-hint { color: var(--muted); font-size: 0.78rem; margin: 0.4rem 0 0; }
+
+  /* Controls */
+  .controls-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+  }
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.75rem 0.85rem 0.9rem;
+    margin: 0;
+  }
+  fieldset legend {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    padding: 0 0.35rem;
+  }
+  .field { margin-bottom: 0.6rem; }
+  .field:last-child { margin-bottom: 0; }
+  label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.25rem; }
+  input[type="text"], input[type="number"], select {
+    width: 100%;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    padding: 0.4rem 0.5rem;
+  }
+  input[type="text"]:focus, input[type="number"]:focus, select:focus, button:focus, canvas:focus {
+    outline: 2px solid var(--orange);
+    outline-offset: 1px;
+  }
+  .field-error {
+    color: var(--red);
+    font-size: 0.72rem;
+    margin-top: 0.2rem;
+    min-height: 1em;
+  }
+  .row { display: flex; gap: 0.6rem; }
+  .row > * { flex: 1; }
+  .toggle-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
+  .toggle-row input { width: auto; }
+  button {
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 0.5rem 0.9rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  button:hover { border-color: var(--orange); }
+  button.primary { background: var(--orange); color: #1a1206; border-color: var(--orange); font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); }
+  .strategy-2 legend, .swatch.s2 { color: var(--orange); }
+  .strategy-3 legend, .swatch.s3 { color: var(--teal); }
+  .strategy-1 legend, .swatch.s1 { color: var(--slate); }
+  .strategy-4 legend, .swatch.s4 { color: #c77dff; }
+  .swatch { display: inline-block; width: 0.7em; height: 0.7em; border-radius: 2px; margin-right: 0.35em; background: currentColor; }
+
+  /* Results table */
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  table.results th, table.results td {
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    text-align: right;
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+  table.results th:first-child, table.results td:first-child {
+    text-align: left;
+    font-family: var(--sans);
+    color: var(--muted);
+    white-space: normal;
+  }
+  table.results thead th { color: var(--muted); font-weight: 600; font-family: var(--sans); }
+  table.results tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .table-scroll { overflow-x: auto; }
+  .hint-banner {
+    background: var(--orange-dim);
+    border: 1px solid rgba(247,147,26,0.4);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    font-size: 0.82rem;
+    margin-bottom: 0.75rem;
+  }
+  .hint-banner[hidden] { display: none; }
+  .hint-banner.mismatch { border-color: var(--red); background: rgba(239,83,80,0.1); }
+
+  .amber-banner {
+    background: rgba(247,147,26,0.12);
+    border: 1px solid var(--orange);
+    color: var(--orange);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.82rem;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+  }
+  .amber-banner[hidden] { display: none; }
+  .diagnostic-mode table.results { opacity: 0.55; filter: grayscale(0.3); }
+  .diagnostic-mode .chart-container { opacity: 0.55; filter: grayscale(0.3); }
+
+  /* Chart legends */
+  .legend-row { display: flex; gap: 1rem; margin-bottom: 0.5rem; font-size: 0.8rem; flex-wrap: wrap; }
+  .chart-toggle { display: flex; gap: 0.5rem; align-items: center; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
+
+  /* Optimizer */
+  details.optimizer > summary {
+    cursor: pointer;
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    padding: 0.25rem 0;
+  }
+  details.optimizer[open] > summary { color: var(--text); }
+  .warning-banner {
+    border: 1px solid var(--red);
+    background: rgba(239,83,80,0.08);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.82rem;
+    margin: 0.75rem 0;
+  }
+  #heatmapContainer { position: relative; display: inline-block; }
+  #heatmapTooltip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--panel-alt);
+    border: 1px solid var(--orange);
+    border-radius: 6px;
+    padding: 0.4rem 0.55rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    z-index: 10;
+  }
+  #heatmapTooltip[hidden] { display: none; }
+  progress { width: 100%; accent-color: var(--orange); }
+  .robustness-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+  .robustness-card { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.75rem; }
+  .robustness-card.win { border-left: 3px solid var(--green); }
+  .robustness-card.lose { border-left: 3px solid var(--red); }
+  .robustness-card.na { border-left: 3px solid var(--muted); opacity: 0.7; }
+
+  /* Data verification (Panel A) */
+  .verify-strip {
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.85rem;
+    font-family: var(--mono);
+    border: 1px solid var(--border);
+  }
+  .verify-strip.pass { border-color: var(--green); color: var(--green); }
+  .verify-strip.suspect { border-color: var(--orange); color: var(--orange); }
+  .verify-strip.fail { border-color: var(--red); color: var(--red); }
+  .verify-strip.unverified { border-color: var(--muted); color: var(--muted); }
+  #verifyDetail summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; margin-top: 0.6rem; }
+
+  /* Mobile-readable verdict strip + numbers block */
+  .verdict-strip {
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    font-family: var(--mono);
+    border: 1px solid var(--border);
+    margin-bottom: 0.85rem;
+  }
+  .verdict-strip.pass { border-color: var(--green); color: var(--green); background: rgba(62,207,110,0.08); }
+  .verdict-strip.fail { border-color: var(--red); color: var(--red); background: rgba(239,83,80,0.08); }
+  .verdict-strip.checking { border-color: var(--muted); color: var(--muted); }
+  .numbers-block { display: flex; flex-direction: column; }
+  .num-row { padding: 0.45rem 0; border-bottom: 1px solid var(--border); }
+  .num-row:last-child { border-bottom: none; }
+  .num-row.ath { font-weight: 700; }
+  .num-top { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
+  .num-label { color: var(--text); font-size: 0.85rem; }
+  .num-value { font-family: var(--mono); font-size: 0.9rem; text-align: right; white-space: nowrap; }
+  .num-sub { display: flex; justify-content: flex-end; align-items: center; gap: 0.35rem; margin-top: 0.15rem; font-size: 0.72rem; color: var(--muted); text-align: right; }
+  .chip-dot { display: inline-block; width: 0.6em; height: 0.6em; border-radius: 50%; flex: none; }
+  .chip-dot.pass { background: var(--green); }
+  .chip-dot.fail { background: var(--red); }
+  .chip-dot.neutral { background: var(--muted); }
+
+  /* Collapsible panel sections with a headline visible while collapsed */
+  details.panel-section { margin: 0; }
+  details.panel-section > summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  details.panel-section > summary::-webkit-details-marker { display: none; }
+  details.panel-section > summary::before {
+    content: "▸";
+    color: var(--muted);
+    font-size: 0.8rem;
+    transition: transform 0.15s ease;
+  }
+  details.panel-section[open] > summary::before { transform: rotate(90deg); }
+  details.panel-section > summary .n {
+    color: var(--orange);
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 1rem;
+  }
+  details.panel-section > summary .section-title {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    font-size: 1rem;
+  }
+  details.panel-section > summary .summary-headline {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-left: auto;
+  }
+  details.panel-section[open] > summary .summary-headline { display: none; }
+
+  /* Copy-to-clipboard buttons */
+  .copy-row { display: flex; justify-content: flex-end; margin-top: 0.6rem; }
+  .copy-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.5rem 1rem;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  .copy-btn.copied { border-color: var(--green); color: var(--green); }
+  #copyAllRow { display: flex; justify-content: flex-end; padding: 0.75rem 1.25rem 0; max-width: 1200px; margin: 0 auto; }
+
+  /* Benchmarks headline (Panel B) */
+  .headline-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 0.5rem; }
+  .headline-item { border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 0.9rem; }
+  .headline-item .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  .headline-item .value { font-family: var(--mono); font-size: 1.5rem; margin-top: 0.2rem; }
+  .headline-item .sub { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+  .headline-item.ceiling .value { color: var(--slate); }
+  .headline-item.best .value { color: var(--orange); }
+  .headline-item.floor .value { color: var(--red); }
+
+  /* Rolling windows (Panel C) */
+  #rollingHistograms { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem; }
+  .rolling-hist-card { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.75rem; }
+  .rolling-hist-card h4 { margin: 0 0 0.4rem; font-size: 0.82rem; font-weight: 600; }
+
+  /* Trace */
+  details.trace > summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; padding: 0.25rem 0; }
+  .trace-controls { display: flex; gap: 0.6rem; align-items: center; margin: 0.75rem 0; flex-wrap: wrap; }
+  table.trace th, table.trace td { padding: 0.3rem 0.5rem; font-size: 0.78rem; }
+
+  footer { max-width: 1200px; margin: 2rem auto 0; padding: 1rem 1.25rem; color: var(--muted); font-size: 0.78rem; border-top: 1px solid var(--border); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+  @media (max-width: 640px) {
+    table.results { font-size: 0.75rem; }
+    .row { flex-direction: column; }
+  }
+
+  /* Mobile readouts: stacked tables, full-bleed charts, legend above plot */
+  @media (max-width: 600px) {
+    main { padding: 0 0.6rem; }
+    #copyAllRow { padding-left: 0.6rem; padding-right: 0.6rem; }
+    table.results, table.results thead, table.results tbody,
+    table.results th, table.results td, table.results tr { display: block; }
+    table.results thead { position: absolute; left: -9999px; }
+    table.results tr {
+      margin-bottom: 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.35rem 0.6rem;
+    }
+    table.results tr:last-child { margin-bottom: 0; }
+    table.results td {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.5rem;
+      border-bottom: none !important;
+      padding: 0.22rem 0;
+      text-align: right;
+      white-space: normal;
+    }
+    table.results td:first-child {
+      font-family: var(--sans);
+      font-weight: 600;
+      color: var(--text);
+      justify-content: flex-start;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border) !important;
+      margin-bottom: 0.2rem;
+    }
+    table.results td:not(:first-child)::before {
+      content: attr(data-label);
+      color: var(--muted);
+      font-family: var(--sans);
+      text-align: left;
+    }
+    table.results td:not(:first-child):not([data-label])::before { content: none; }
+    .chart-container { min-height: 240px; margin: 0 -0.6rem; width: calc(100% + 1.2rem); }
+    .chart-container .uplot { display: flex; flex-direction: column-reverse; }
+    .chart-container .u-legend { margin-bottom: 0.4rem; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>BTC <span class="accent">Power-Law</span> DCA Backtester</h1>
+  <p>Compare plain DCA against power-law-weighted accumulation under a realistic cash reserve. USD only — see README.</p>
+</header>
+
+<div id="copyAllRow"><button id="copyAllBtn" type="button" class="copy-btn primary">Copy all (paste into chat)</button></div>
+
+<main>
+
+  <section id="dataError" class="panel" style="border-color: var(--red); display:none;"></section>
+
+  <section id="dataVerifySection">
+    <details class="panel-section" id="dataVerifyDetails" open>
+      <summary>
+        <span class="n">01</span><span class="section-title">Data verification</span>
+        <span class="summary-headline" id="dataVerifyHeadline">Checking…</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div id="verdictStrip" class="verdict-strip checking">Checking committed data…</div>
+        <div class="numbers-block" id="numbersBlock"></div>
+        <div class="copy-row"><button id="dataCopyBtn" type="button" class="copy-btn">Copy</button></div>
+        <details id="verifyDetail" style="margin-top:0.9rem;">
+          <summary>Chart &amp; raw tables</summary>
+          <div id="verifyOverlayChart" class="chart-container" style="margin-top:0.5rem;"></div>
+          <p class="chart-hint" id="verifyOverlayHint" hidden>Committed vs. live close over the overlapping window.</p>
+          <h3 style="font-size:0.85rem; margin:1rem 0 0.4rem;">Anchors</h3>
+          <div class="table-scroll"><table class="results" id="anchorTable"></table></div>
+          <h3 style="font-size:0.85rem; margin:1rem 0 0.4rem;">Shape diagnostics (full history)</h3>
+          <div class="table-scroll"><table class="results" id="shapeTable"></table></div>
+        </details>
+      </div>
+    </details>
+  </section>
+
+  <section id="priceChartSection">
+    <h2><span class="n">02</span> Price &amp; power-law fair value</h2>
+    <div class="panel">
+      <div class="legend-row">
+        <span><span class="swatch" style="background:#e8e8e8"></span>Close</span>
+        <span><span class="swatch" style="background:#f7931a"></span>Power-law fair value</span>
+        <span><span class="swatch" style="background:rgba(247,147,26,0.35)"></span>±1σ residual band</span>
+      </div>
+      <div id="priceChart" class="chart-container"></div>
+      <p class="chart-hint">Drag horizontally to select the backtest period. Axes are log/log; the x-axis is labelled by calendar year.</p>
+    </div>
+  </section>
+
+  <section id="controlsSection">
+    <h2><span class="n">03</span> Controls</h2>
+    <div class="panel controls-grid">
+      <fieldset>
+        <legend>Period</legend>
+        <div class="field">
+          <label for="startDate">Start date (DD.MM.YYYY)</label>
+          <input type="text" id="startDate" inputmode="numeric" placeholder="01.01.2018" />
+          <div class="field-error" id="startDateError"></div>
+        </div>
+        <div class="field">
+          <label for="endDate">End date (DD.MM.YYYY)</label>
+          <input type="text" id="endDate" inputmode="numeric" placeholder="31.12.2024" />
+          <div class="field-error" id="endDateError"></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Model</legend>
+        <div class="field">
+          <label for="fitMode">Power-law fit mode</label>
+          <select id="fitMode">
+            <option value="expanding">Expanding (honest, default)</option>
+            <option value="full">Full-sample (in-sample, optimistic)</option>
+          </select>
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="calibration" />
+          <label for="calibration" style="margin:0;">Calibrate multiplier (k) so median = 1</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Funding</legend>
+        <div class="field">
+          <label for="fundingMode">Funding mode</label>
+          <select id="fundingMode">
+            <option value="strict">Strict (reserve starts at 0, never negative)</option>
+            <option value="seeded">Seeded (reserve starts at starting capital)</option>
+            <option value="unbound">Unbound (diagnostic only — can borrow)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="startingCapital">Starting capital (USD, t0, all strategies)</label>
+          <input type="number" id="startingCapital" min="0" step="100" />
+        </div>
+        <div class="field">
+          <label for="reserveRateAnnual">Yield on reserve (annual %)</label>
+          <input type="number" id="reserveRateAnnual" step="0.1" />
+        </div>
+      </fieldset>
+
+      <fieldset class="strategy-1">
+        <legend><span class="swatch s1"></span>1 · DCA</legend>
+        <div class="field">
+          <label for="depositDca">Monthly deposit (USD)</label>
+          <input type="number" id="depositDca" min="0" step="10" />
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumDca" />
+          <label for="lumpSumDca" style="margin:0;">Deploy starting capital immediately</label>
+        </div>
+      </fieldset>
+
+      <fieldset class="strategy-2">
+        <legend><span class="swatch s2"></span>2 · Power-law linear</legend>
+        <div class="field">
+          <label for="depositLinear">Monthly deposit (USD)</label>
+          <input type="number" id="depositLinear" min="0" step="10" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="mMinLinear">m min</label>
+            <input type="number" id="mMinLinear" min="0" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="mMaxLinear">m max</label>
+            <input type="number" id="mMaxLinear" min="0" step="0.25" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="targetDeploymentLinear">Target deployment (0.3 – 1.0)</label>
+          <input type="number" id="targetDeploymentLinear" min="0.3" max="1" step="0.05" />
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumLinear" />
+          <label for="lumpSumLinear" style="margin:0;">Deploy starting capital immediately</label>
+        </div>
+      </fieldset>
+
+      <fieldset class="strategy-3">
+        <legend><span class="swatch s3"></span>3 · Power-law squared</legend>
+        <div class="field">
+          <label for="depositSquared">Monthly deposit (USD)</label>
+          <input type="number" id="depositSquared" min="0" step="10" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="mMinSquared">m min</label>
+            <input type="number" id="mMinSquared" min="0" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="mMaxSquared">m max</label>
+            <input type="number" id="mMaxSquared" min="0" step="0.25" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="targetDeploymentSquared">Target deployment (0.3 – 1.0)</label>
+          <input type="number" id="targetDeploymentSquared" min="0.3" max="1" step="0.05" />
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumSquared" />
+          <label for="lumpSumSquared" style="margin:0;">Deploy starting capital immediately</label>
+        </div>
+      </fieldset>
+
+      <fieldset class="strategy-4">
+        <legend><span class="swatch s4"></span>4 · Threshold reserve</legend>
+        <div class="field toggle-row">
+          <input type="checkbox" id="thresholdEnabled" />
+          <label for="thresholdEnabled" style="margin:0;">Enable (off by default)</label>
+        </div>
+        <div class="field">
+          <label for="depositThreshold">Monthly deposit (USD)</label>
+          <input type="number" id="depositThreshold" min="0" step="10" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="mMinThreshold">m min</label>
+            <input type="number" id="mMinThreshold" min="0" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="mMaxThreshold">m max</label>
+            <input type="number" id="mMaxThreshold" min="0" step="0.25" />
+          </div>
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="thresholdUseBand" />
+          <label for="thresholdUseBand" style="margin:0;">Define "deep value" as a ±σ residual band</label>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="thresholdEnterRatio">Enter ratio (fair/price), used unless band is checked</label>
+            <input type="number" id="thresholdEnterRatio" min="1" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="thresholdBandSigma">Band width (σ), used if band is checked</label>
+            <input type="number" id="thresholdBandSigma" min="0" step="0.1" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="thresholdBaseRate">Base rate (below threshold)</label>
+            <input type="number" id="thresholdBaseRate" min="0" max="1" step="0.05" />
+          </div>
+          <div class="field">
+            <label for="thresholdSpendFraction">Reserve spend fraction (at/above threshold)</label>
+            <input type="number" id="thresholdSpendFraction" min="0" max="1" step="0.05" />
+          </div>
+        </div>
+        <div class="field toggle-row">
+          <input type="checkbox" id="lumpSumThreshold" />
+          <label for="lumpSumThreshold" style="margin:0;">Deploy starting capital immediately</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Actions</legend>
+        <div class="field">
+          <button id="resetBtn" type="button">Reset to defaults</button>
+        </div>
+        <div class="field">
+          <label>Share this configuration</label>
+          <button id="copyLinkBtn" type="button">Copy link to clipboard</button>
+        </div>
+      </fieldset>
+    </div>
+  </section>
+
+  <section id="resultsSection">
+    <details class="panel-section" id="resultsDetails" open>
+      <summary>
+        <span class="n">04</span><span class="section-title">Results</span>
+        <span class="summary-headline" id="resultsHeadline">Run the backtest to see results.</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="amber-banner" id="unboundBanner" hidden>
+          Diagnostic only: unbound funding lets the reserve go negative (i.e. borrows to fund every desired purchase in
+          full). This is never a runnable strategy — it exists to separate "the funding constraint hurt the strategy"
+          from "the multiplier shape is the problem." Excluded from the optimizer. Results below are shown muted.
+        </div>
+        <div class="hint-banner mismatch" id="committedMismatchHint" hidden>
+          Total committed capital differs between strategies (see the row below), so the "vs. DCA" delta rows are not shown —
+          a delta is only meaningful when every strategy put in the same amount.
+        </div>
+        <div id="resultsPanelBody" class="table-scroll">
+          <table class="results" id="resultsTable"></table>
+        </div>
+        <div class="copy-row"><button id="backtestCopyBtn" type="button" class="copy-btn">Copy</button></div>
+      </div>
+    </details>
+  </section>
+
+  <section id="valueChartSection">
+    <h2><span class="n">05</span> Portfolio value over time</h2>
+    <div class="panel">
+      <label class="chart-toggle"><input type="checkbox" id="valueLogToggle" /> Log scale</label>
+      <div id="valueChart" class="chart-container"></div>
+    </div>
+  </section>
+
+  <section id="reserveChartSection">
+    <h2><span class="n">06</span> Reserve balance over time</h2>
+    <div class="panel">
+      <div id="reserveChart" class="chart-container"></div>
+      <p class="chart-hint">Cash sitting in reserve, waiting to be deployed. This is where "dry-out" becomes visible.</p>
+    </div>
+  </section>
+
+  <section id="multiplierChartSection">
+    <h2><span class="n">07</span> Multiplier over time</h2>
+    <div class="panel">
+      <div id="multiplierChart" class="chart-container"></div>
+      <p class="chart-hint">Dashed lines mark each strategy's mMin/mMax boundaries — clipping against them is visible directly.</p>
+    </div>
+  </section>
+
+  <section id="benchmarksSection">
+    <details class="panel-section" id="benchmarksDetails">
+      <summary>
+        <span class="n">08</span><span class="section-title">Benchmarks: ceiling, floor &amp; significance</span>
+        <span class="summary-headline" id="benchmarksHeadline">Not run yet.</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
+          <div class="field">
+            <label for="benchmarkStrategy">Strategy to benchmark</label>
+            <select id="benchmarkStrategy">
+              <option value="1">2 · Power-law linear</option>
+              <option value="2">3 · Power-law squared</option>
+              <option value="3" id="benchmarkStrategyThresholdOpt" hidden>4 · Threshold reserve</option>
+            </select>
+          </div>
+          <div class="field">
+            <button id="runBenchmarkBtn" class="primary" type="button">Run benchmarks</button>
+          </div>
+        </div>
+        <div id="benchmarkResults" hidden>
+          <div class="headline-row" id="benchmarkHeadline"></div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Where the money went</h3>
+          <div id="allocationChart" class="chart-container"></div>
+          <div class="legend-row">
+            <span><span class="swatch" style="background:rgba(230,230,230,0.4)"></span>Clairvoyant allocation (ceiling)</span>
+            <span><span class="swatch s2"></span>Strategy's actual spend</span>
+            <span><span class="swatch" style="background:rgba(255,255,255,0.7)"></span>Price (log)</span>
+          </div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Is the edge real? (permutation test)</h3>
+          <p class="chart-hint">Same multipliers, months shuffled. If the real chronological order doesn't beat most shuffles, the edge is size, not timing.</p>
+          <div id="permutationChart" class="chart-container"></div>
+          <p class="chart-hint" id="permutationCaption"></p>
+
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Real vs. shuffled: what actually differs</h3>
+          <p class="chart-hint">The permutation shuffle keeps the same multipliers and the same funding mode — only which month each one lands on changes. If the real run and the shuffled average agree on invested/deployment rate but disagree on BTC, the edge is timing; if they disagree on invested/deployment rate too, some of the "edge" is really just funding starvation working differently under shuffling.</p>
+          <div class="table-scroll">
+            <table class="results" id="diagnosticsTable"></table>
+          </div>
+          <p class="chart-hint" id="diagnosticsInterpretation" style="margin-top:0.6rem;"></p>
+          <div class="copy-row"><button id="benchmarkCopyBtn" type="button" class="copy-btn">Copy</button></div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section id="deploymentSweepSection">
+    <h2><span class="n">08b</span> Deployment-ratio sweep</h2>
+    <div class="panel">
+      <p class="chart-hint">
+        Diagnostic workflow: under strict funding, sweep target deployment for the benchmarked strategy from 1.0 down to
+        0.5 and watch the permutation p-value (not the return). If p stays high throughout, the multiplier's shape isn't
+        producing a timing edge, whatever the funding constraint. If p drops sharply as target deployment falls, the
+        strategy needed unmet demand (starvation) to look non-random — the funding constraint was doing the work.
+      </p>
+      <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
+        <div class="field">
+          <button id="runSweepBtn" class="primary" type="button">Run sweep (1.0 → 0.5)</button>
+        </div>
+      </div>
+      <div id="sweepResults" hidden>
+        <div id="sweepChart" class="chart-container"></div>
+        <div class="table-scroll">
+          <table class="results" id="sweepTable"></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="rollingSection">
+    <details class="panel-section" id="rollingDetails">
+      <summary>
+        <span class="n">09</span><span class="section-title">Rolling windows</span>
+        <span class="summary-headline" id="rollingHeadline">Not run yet.</span>
+      </summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="warning-banner">
+          One full-period result is one observation. This slides a fixed-length window across the whole series so you can see
+          whether that result was typical or lucky.
+        </div>
+        <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
+          <div class="field">
+            <label for="rollingWindowMonths">Window length</label>
+            <select id="rollingWindowMonths">
+              <option value="24">24 months</option>
+              <option value="36">36 months</option>
+              <option value="48" selected>48 months</option>
+              <option value="60">60 months</option>
+            </select>
+          </div>
+          <div class="field">
+            <button id="runRollingBtn" class="primary" type="button">Run rolling study</button>
+          </div>
+        </div>
+        <div id="rollingResults" hidden>
+          <p class="chart-hint" id="effectiveNNote"></p>
+          <h3 style="font-size:0.9rem; margin:0.75rem 0 0.4rem;">Δ BTC vs. DCA by window start date</h3>
+          <div id="deltaVsStartChart" class="chart-container"></div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Distribution of Δ BTC vs. DCA</h3>
+          <div id="rollingHistograms"></div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Summary</h3>
+          <div class="table-scroll">
+            <table class="results" id="rollingSummaryTable"></table>
+          </div>
+          <div class="copy-row"><button id="rollingCopyBtn" type="button" class="copy-btn">Copy</button></div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section id="optimizerSection">
+    <details class="optimizer">
+      <summary><span class="n" style="color:var(--orange); font-family:var(--mono);">10</span> Optimizer</summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="warning-banner">
+          These boundaries are fitted to one realised price path. A lone bright cell is overfitting; a broad plateau is a real
+          effect. A parameter set that only wins on the full period is curve-fitting, not a strategy — check the robustness panel below.
+        </div>
+        <div class="amber-banner" id="optimizerUnboundWarning" hidden>
+          The optimizer does not run under unbound funding — it's a diagnostic mode (negative balances, i.e. borrowing),
+          and searching over it would rank boundaries by how much debt they're willing to take on. Switch funding mode
+          to strict or seeded in Controls first.
+        </div>
+        <div class="row" style="align-items:flex-end; margin-bottom:0.75rem;">
+          <div class="field">
+            <label for="optStrategy">Strategy to optimize</label>
+            <select id="optStrategy">
+              <option value="1">2 · Power-law linear</option>
+              <option value="2">3 · Power-law squared</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="optObjective">Objective</label>
+            <select id="optObjective">
+              <option value="btcAccumulated">BTC accumulated</option>
+              <option value="totalValue">Total value</option>
+              <option value="xirr">XIRR</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="optTargetDeployment">Target deployment (fixed)</label>
+            <input type="number" id="optTargetDeployment" min="0.3" max="1" step="0.05" />
+          </div>
+          <div class="field">
+            <button id="runOptimizerBtn" class="primary" type="button">Run sweep</button>
+          </div>
+        </div>
+        <div id="optimizerProgress" hidden>
+          <progress id="optimizerProgressBar" max="100" value="0"></progress>
+          <p class="chart-hint" id="optimizerProgressLabel"></p>
+        </div>
+        <div id="optimizerResults" hidden>
+          <h3 style="font-size:0.9rem; margin-bottom:0.4rem;">Heatmap (colour = objective vs. DCA baseline)</h3>
+          <div id="heatmapContainer">
+            <div id="heatmapContainer2"></div>
+          </div>
+          <div id="heatmapTooltip" hidden></div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Top 10</h3>
+          <div class="table-scroll">
+            <table class="results" id="top10Table"></table>
+          </div>
+          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Robustness — does the top result beat DCA in every sub-period?</h3>
+          <div class="robustness-grid" id="robustnessGrid"></div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section id="traceSection">
+    <details class="trace">
+      <summary><span class="n" style="color:var(--orange); font-family:var(--mono);">11</span> Month-by-month trace</summary>
+      <div class="panel" style="margin-top:0.75rem;">
+        <div class="trace-controls">
+          <label for="traceStrategy" style="margin:0;">Strategy:</label>
+          <select id="traceStrategy">
+            <option value="0">1 · DCA</option>
+            <option value="1">2 · Power-law linear</option>
+            <option value="2">3 · Power-law squared</option>
+            <option value="3" id="traceStrategyThresholdOpt" hidden>4 · Threshold reserve</option>
+          </select>
+          <button id="downloadCsvBtn" type="button">Download CSV</button>
+        </div>
+        <div class="table-scroll">
+          <table class="trace" id="traceTable"></table>
+        </div>
+      </div>
+    </details>
+  </section>
+
+</main>
+
+<footer>
+  BTC/USD daily closes, USD only. Power law assumed to hold; past price paths do not repeat; optimizer boundaries are fitted to
+  one realised history. See <a href="README.md">README</a> and <a href="tests.html">correctness checks</a>.
+</footer>
+
+<script src="js/vendor/uPlot.iife.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/powerlaw.js"></script>
+<script src="js/backtest.js"></script>
+<script src="js/benchmarks.js"></script>
+<script src="js/rolling.js"></script>
+<script src="js/datacheck.js"></script>
+<script src="js/optimizer.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
