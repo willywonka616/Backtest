@@ -462,6 +462,116 @@
       );
     });
 
+    // 24. blockShuffle: output is a permutation of the input (same multiset,
+    // same length), reproducible under a fixed seed, and degenerates to the
+    // identity when the block spans the whole series (only one order is
+    // possible with a single block).
+    check("24. blockShuffle preserves the multiset and is deterministic under a seeded RNG", (assert) => {
+      const src = Float64Array.from({ length: 30 }, (_, i) => i);
+      const shuffledA = BM.blockShuffle(src, 12, BM.mulberry32(3));
+      const shuffledB = BM.blockShuffle(src, 12, BM.mulberry32(3));
+      assert(shuffledA.length === src.length, `expected length ${src.length}, got ${shuffledA.length}`);
+      assert(
+        Array.from(shuffledA)
+          .sort((a, b) => a - b)
+          .every((v, i) => v === i),
+        "expected blockShuffle to be a permutation containing every original element exactly once"
+      );
+      assert(
+        Array.from(shuffledA).every((v, i) => v === shuffledB[i]),
+        "expected the same seed to reproduce the same shuffle"
+      );
+      const single = BM.blockShuffle(src, 40, BM.mulberry32(1));
+      assert(
+        Array.from(single).every((v, i) => v === i),
+        "a single block spanning the whole series has only one possible order (identity)"
+      );
+    });
+
+    // 25. blockShuffle reorders BLOCKS, never elements within a block — each
+    // contiguous 12-run in the output must still count up by exactly 1,
+    // whichever original block it turns out to be.
+    check("25. blockShuffle keeps each block's internal order intact, only reorders blocks", (assert) => {
+      const src = Float64Array.from({ length: 24 }, (_, i) => i);
+      const shuffled = BM.blockShuffle(src, 12, BM.mulberry32(5));
+      for (let b = 0; b < 2; b++) {
+        const block = Array.from(shuffled.slice(b * 12, b * 12 + 12));
+        for (let i = 1; i < block.length; i++) {
+          assert(block[i] === block[i - 1] + 1, `block ${b} lost internal order: ${block}`);
+        }
+      }
+    });
+
+    // 26. signalPermutationTest degenerate case, mirroring test 11: at
+    // exponent 0 the power-law multiplier is 1 regardless of the fair/price
+    // ratio (calibrationConstant short-circuits to 1, and anything^0 is 1),
+    // so shuffling the ratio changes nothing about the run — every
+    // replicate ties the observed result on BOTH metrics, giving the same
+    // "no significance" p=1 the legacy test reports for a constant array.
+    check("26. signalPermutationTest reports no significance for a constant (untimed) strategy", (assert) => {
+      const dates = BM.monthStarts("2018-01-01", "2020-12-01");
+      const prices = Float64Array.from(dates, BM.closeOn);
+      const fair = Float64Array.from(prices, (p, i) => p * (1 + 0.2 * Math.sin(i)));
+      const s = { strategyType: "power", exponent: 0, mMin: 0, mMax: 5, calibrate: true, targetDeployment: 1 };
+      const perm = BM.signalPermutationTest(fair, prices, 500, s, { fundingMode: "strict" }, { iterations: 300, seed: 7 });
+      assert(perm.pValue === 1, `expected p=1 for exponent-0 (untimed) strategy, got ${perm.pValue}`);
+      assert(perm.nullSd < 1e-9, `expected a near-zero-spread null BTC distribution, got sd=${perm.nullSd}`);
+      assert(perm.pValueTotalValue === 1, `expected p=1 for total value too, got ${perm.pValueTotalValue}`);
+      assert(perm.nullSdTotalValue < 1e-9, `expected a near-zero-spread null total-value distribution, got sd=${perm.nullSdTotalValue}`);
+    });
+
+    // 27. signalPermutationTest's own observed run (no shuffling) must match
+    // an independently computed buildStrategyMultipliers + ledger run on the
+    // same fair/prices — this is the "full re-run from scratch" contract:
+    // ratio = fair/price then fair' = ratio*price must round-trip exactly.
+    check("27. signalPermutationTest's observed run matches a direct buildStrategyMultipliers + ledger run", (assert) => {
+      const dates = BM.monthStarts("2018-01-01", "2021-12-01");
+      const prices = Float64Array.from(dates, BM.closeOn);
+      const fair = Float64Array.from(BM.fairValueSeries(dates, "full"));
+      const s = { strategyType: "threshold", mMin: 0, mMax: 4, threshold: { enterThreshold: 1.2, baseRate: 0.5, reserveSpendFraction: 0.3 } };
+      const fundingOpts = { fundingMode: "strict" };
+      const mult = BM.buildStrategyMultipliers(fair, prices, 500, s, fundingOpts);
+      const direct = BM.runWithLumpSum(prices, mult, 500, fundingOpts, false);
+      const perm = BM.signalPermutationTest(fair, prices, 500, s, fundingOpts, { iterations: 50, seed: 3 });
+      assert(approxEqual(perm.observedBtc, direct.btc, 1e-9), `observed btc mismatch: perm=${perm.observedBtc} direct=${direct.btc}`);
+      assert(
+        approxEqual(perm.observedTotalValue, direct.totalValue, 1e-9),
+        `observed totalValue mismatch: perm=${perm.observedTotalValue} direct=${direct.totalValue}`
+      );
+    });
+
+    // 28. The whole point of the signal-permutation test: for a
+    // path-dependent (threshold) strategy, re-deriving the multiplier from
+    // a shuffled SIGNAL must actually change the multiplier VALUES, not
+    // just their order, because each month's multiplier depends on the
+    // running reserve balance carried in from every earlier month. The
+    // legacy test (shuffling the multiplier array directly) could only ever
+    // reorder the exact same values — this checks the new test does not
+    // silently degenerate into that.
+    check("28. signalPermutationTest re-derives the threshold multiplier from scratch, not just reorders it", (assert) => {
+      const dates = BM.monthStarts("2018-01-01", "2021-12-01");
+      const prices = Float64Array.from(dates, BM.closeOn);
+      const fair = Float64Array.from(BM.fairValueSeries(dates, "full"));
+      const s = { strategyType: "threshold", mMin: 0, mMax: 4, threshold: { enterThreshold: 1.2, baseRate: 0.5, reserveSpendFraction: 0.3 } };
+      const fundingOpts = { fundingMode: "strict" };
+      const realMult = BM.buildStrategyMultipliers(fair, prices, 500, s, fundingOpts);
+      const ratio = Float64Array.from(prices, (p, i) => fair[i] / p);
+      const shuffledRatio = BM.blockShuffle(ratio, 12, BM.mulberry32(11));
+      const shuffledFair = Float64Array.from(shuffledRatio, (r, i) => r * prices[i]);
+      const shuffledMult = BM.buildStrategyMultipliers(shuffledFair, prices, 500, s, fundingOpts);
+      const realSorted = Array.from(realMult).sort((a, b) => a - b);
+      const shuffledSorted = Array.from(shuffledMult).sort((a, b) => a - b);
+      let identicalMultiset = realSorted.length === shuffledSorted.length;
+      for (let i = 0; identicalMultiset && i < realSorted.length; i++) {
+        if (!approxEqual(realSorted[i], shuffledSorted[i], 1e-9)) identicalMultiset = false;
+      }
+      assert(
+        !identicalMultiset,
+        "expected the re-derived multiplier VALUES (not just their order) to differ under a shuffled signal — a threshold " +
+          "strategy's multiplier depends on the running reserve balance, so this must not degenerate into a reordering"
+      );
+    });
+
     return results;
   }
 

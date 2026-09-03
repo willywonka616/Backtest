@@ -689,10 +689,17 @@
             <span><span class="swatch s2"></span>Strategy's actual spend</span>
             <span><span class="swatch" style="background:rgba(255,255,255,0.7)"></span>Price (log)</span>
           </div>
-          <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Is the edge real? (permutation test)</h3>
-          <p class="chart-hint">Same multipliers, months shuffled. If the real chronological order doesn't beat most shuffles, the edge is size, not timing.</p>
+          <div style="display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; margin:1.25rem 0 0.4rem;">
+            <h3 style="font-size:0.9rem; margin:0;">Is the edge real? (permutation test)</h3>
+            <label class="chart-toggle" style="margin-bottom:0;"><input type="checkbox" id="legacyPermutationToggle" /> legacy — invalid for threshold</label>
+          </div>
+          <p class="chart-hint" id="permutationModeHint"></p>
           <div id="permutationChart" class="chart-container"></div>
           <p class="chart-hint" id="permutationCaption"></p>
+          <div id="permutationValueSection">
+            <div id="permutationValueChart" class="chart-container"></div>
+            <p class="chart-hint" id="permutationValueCaption"></p>
+          </div>
 
           <h3 style="font-size:0.9rem; margin:1.25rem 0 0.4rem;">Real vs. shuffled: what actually differs</h3>
           <p class="chart-hint">The permutation shuffle keeps the same multipliers and the same funding mode — only which month each one lands on changes. If the real run and the shuffled average agree on invested/deployment rate but disagree on BTC, the edge is timing; if they disagree on invested/deployment rate too, some of the "edge" is really just funding starvation working differently under shuffling.</p>

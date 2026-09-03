@@ -113,10 +113,26 @@ Section 08 answers the question the raw comparison table can't: is a strategy's 
 real, or is it noise? `perfectTiming()` computes the exact best- and worst-case allocation any
 timing rule could achieve under the same deposit-can-only-be-spent-later constraint — if the
 ceiling itself is only a few percent above DCA, no signal could have helped over that window,
-and the model isn't what to blame. `permutationTest()` reruns the ledger thousands of times
-with the same multipliers shuffled onto different months; if the real chronological order
-doesn't beat most of the shuffles, the observed edge came from the *size* of the multipliers,
-not their *timing*.
+and the model isn't what to blame.
+
+The significance test is `signalPermutationTest()`. It shuffles the **fair/price ratio** — the
+one primitive every strategy derives its multiplier from — in contiguous **12-month blocks**
+using a seeded RNG, then reruns the *entire* strategy from scratch on each shuffled signal:
+calibration, clamps, and the ledger. Shuffling whole 12-month blocks (not individual months)
+keeps a shuffled replicate's regime persistence intact — a real multi-month over/undervaluation
+stretch survives, only *when* it lands is randomized; shuffling single months would erase that
+persistence and bias every replicate toward the mean. It reports a p-value and percentile for
+**both** BTC accumulated and total value (BTC + cash left), each against its own histogram of
+2000 shuffled replicates with the observed result marked.
+
+This replaced an earlier, invalid version, `permutationTest()`, that shuffled the **multiplier
+array** directly instead of the underlying ratio. That's harmless for the power-law strategies,
+whose multiplier is a stateless function of price alone, but wrong for the threshold strategy:
+its multiplier at month *t* depends on the reserve balance carried in from every earlier
+month, so permuting the multiplier array produces sequences the strategy could never actually
+have generated — the null distribution it built was not a real threshold strategy's null
+distribution. The old test is kept, unchanged, behind a **"legacy — invalid for threshold"**
+toggle next to the permutation chart (off by default) purely so the two can be compared.
 
 ## Rolling windows
 
@@ -179,8 +195,11 @@ buys a slow `baseRate × deposit` (default 0.6×, building reserve); at or above
 `deposit + reserveSpendFraction × balance` (default 0.25× whatever reserve has accumulated). Unlike
 the power-law multiplier, this rule depends on the running reserve balance, so it can't be
 precomputed as a stateless function of price alone — it runs its own forward pass mirroring the
-shared ledger's exact balance mechanics, then flows through everything else (permutation test,
-rolling windows, benchmarks) exactly like any other strategy from that point on.
+shared ledger's exact balance mechanics, then flows through everything else (rolling windows,
+benchmarks) exactly like any other strategy from that point on. It's also exactly why the
+significance test has to shuffle the *signal* rather than the *multiplier* (see Benchmarks,
+above): a threshold multiplier array bakes in this strategy's own reserve history, so shuffling
+that array directly isn't a valid null distribution for it.
 
 ## Assumptions and limitations
 
@@ -205,15 +224,19 @@ conservation, degenerate-boundary and zero-exponent equivalence to plain DCA, po
 recovery on synthetic data, XIRR sanity, the no-lookahead guarantee of the expanding fit,
 agreement between `Backtest.runLedger` and the shared `Benchmarks.simulateLedger` (there is
 exactly one implementation of the ledger arithmetic — two would drift apart and quietly
-invalidate every comparison the app makes), the ceiling/floor bracketing DCA, the permutation
-test's degenerate case, the data-verification helpers, the `targetDeployment` calibration
-identity, `lumpSumAtStart` conservation (same total committed, different deployment timing), the
-threshold strategy's baseRate/reserve-fraction shape on a hand-worked synthetic series, unbound
-funding's ability to go into debt versus strict/seeded never doing so, `computeMetrics`
-folding starting capital into `totalCommitted` and the XIRR t0 outflow, and the mobile
-data-check helpers (`findATH` locating a synthetic series' true peak rather than its last
-value, `dataHealth` counting zero/negative closes and reading the committed `fillCount`, and
-`staleDays` against both a stale and a fresh reference date).
+invalidate every comparison the app makes), the ceiling/floor bracketing DCA, the legacy
+multiplier-permutation test's degenerate case, the data-verification helpers, the
+`targetDeployment` calibration identity, `lumpSumAtStart` conservation (same total committed,
+different deployment timing), the threshold strategy's baseRate/reserve-fraction shape on a
+hand-worked synthetic series, unbound funding's ability to go into debt versus strict/seeded
+never doing so, `computeMetrics` folding starting capital into `totalCommitted` and the XIRR t0
+outflow, the mobile data-check helpers (`findATH` locating a synthetic series' true peak rather
+than its last value, `dataHealth` counting zero/negative closes and reading the committed
+`fillCount`, and `staleDays` against both a stale and a fresh reference date), and the signal
+permutation test (`blockShuffle`'s block-order-only shuffling, its degenerate case at exponent 0,
+its observed run matching a direct ledger run exactly, and — the point of the whole rewrite —
+that a threshold strategy's re-derived multiplier actually changes value, not just position,
+under a shuffled signal).
 
 ## Repository layout
 
@@ -222,7 +245,8 @@ index.html            markup + inline CSS
 js/data.js             BTC daily close series (committed, regenerate with tools/fetch-data.mjs)
 js/powerlaw.js          power-law OLS fitting (full + expanding modes)
 js/backtest.js          ledger simulation (via js/benchmarks.js), calibration, metrics, XIRR
-js/benchmarks.js        shared simulateLedger(), perfect-timing ceiling/floor, permutation test
+js/benchmarks.js        shared simulateLedger(), perfect-timing ceiling/floor, signal permutation
+                        test (+ legacy multiplier-permutation, kept behind a toggle)
 js/rolling.js           rolling-window robustness study
 js/datacheck.js         live-source + anchor + shape verification of js/data.js
 js/optimizer.js         mMin/mMax grid search + robustness sub-periods

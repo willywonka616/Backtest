@@ -199,6 +199,15 @@
   // {fundingMode: 'unbound'} to answer "is the funding constraint what
   // destroys the signal": if p flips from ~1 under 'strict' to <0.01 under
   // 'unbound', the constraint was the problem, not the model.
+  //
+  // LEGACY — invalid for path-dependent strategies (threshold). A
+  // threshold strategy's multiplier at month t depends on the reserve
+  // balance carried in from every earlier month, so the multiplier ARRAY
+  // itself encodes that history; permuting it directly produces sequences
+  // of multipliers the strategy could never actually have produced (e.g. a
+  // "spend from reserve" month with no reserve behind it). Kept only for
+  // the legacy-toggle comparison — see signalPermutationTest below for the
+  // valid replacement, used everywhere by default.
   function permutationTest(prices, multipliers, deposit, iterations, rng, ledgerOpts) {
     iterations = iterations || 2000;
     rng = rng || mulberry32(42);
@@ -222,30 +231,163 @@
       nullInvested[i] = run.invested;
     }
 
-    let atOrAbove = 0;
-    for (let i = 0; i < iterations; i++) if (nullBtc[i] >= observed.btc) atOrAbove++;
-
     const meanOf = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
-    const sorted = Float64Array.from(nullBtc).sort();
-    const mean = meanOf(sorted);
-    const variance = sorted.reduce((a, b) => a + (b - mean) ** 2, 0) / (iterations - 1);
     const deploymentRateOf = (invested) => (observed.deposited > 0 ? invested / observed.deposited : null);
+    const stats = summarizeNull(nullBtc, observed.btc);
 
     return {
       observedBtc: observed.btc,
       observedStarvedMonths: observed.starvedMonths,
       observedInvested: observed.invested,
       observedDeploymentRate: deploymentRateOf(observed.invested),
-      nullBtc: sorted,
+      nullBtc: stats.sorted,
       nullMeanStarvedMonths: meanOf(nullStarved),
       nullMeanInvested: meanOf(nullInvested),
       nullMeanDeploymentRate: deploymentRateOf(meanOf(nullInvested)),
+      pValue: stats.pValue,
+      percentile: stats.percentile,
+      nullMean: stats.mean,
+      nullSd: stats.sd,
+      nullP05: stats.p05,
+      nullP95: stats.p95,
+    };
+  }
+
+  // One-sided (>=) p-value/percentile/mean/sd/p05/p95 for a null distribution
+  // against one observed value. Shared by the legacy multiplier-permutation
+  // test and the signal-permutation test below, once per metric each.
+  function summarizeNull(nullArr, observedValue) {
+    const iterations = nullArr.length;
+    let atOrAbove = 0;
+    for (let i = 0; i < iterations; i++) if (nullArr[i] >= observedValue) atOrAbove++;
+    const sorted = Float64Array.from(nullArr).sort();
+    const mean = sorted.reduce((a, b) => a + b, 0) / iterations;
+    const variance = sorted.reduce((a, b) => a + (b - mean) ** 2, 0) / (iterations - 1);
+    return {
+      sorted,
       pValue: (atOrAbove + 1) / (iterations + 1),
       percentile: 100 * (1 - atOrAbove / iterations),
-      nullMean: mean,
-      nullSd: Math.sqrt(variance),
-      nullP05: sorted[Math.floor(0.05 * iterations)],
-      nullP95: sorted[Math.floor(0.95 * iterations)],
+      mean,
+      sd: Math.sqrt(variance),
+      p05: sorted[Math.floor(0.05 * iterations)],
+      p95: sorted[Math.floor(0.95 * iterations)],
+    };
+  }
+
+  // Splits `src` into contiguous blocks of `blockSize` elements (the final
+  // block may be shorter) and returns a new array with the BLOCK ORDER
+  // shuffled — each block's internal sequence is left untouched. This keeps
+  // whatever regime persistence a real 12-month stretch has (a real
+  // multi-month over/undervaluation run) intact within every replicate;
+  // only WHICH stretch lands WHEN is randomized. An element-wise shuffle
+  // would erase that persistence and bias every replicate toward the
+  // sample mean instead.
+  function blockShuffle(src, blockSize, rng) {
+    const n = src.length;
+    const blockCount = Math.ceil(n / blockSize);
+    const order = new Array(blockCount);
+    for (let i = 0; i < blockCount; i++) order[i] = i;
+    for (let j = blockCount - 1; j > 0; j--) {
+      const k = Math.floor(rng() * (j + 1));
+      const tmp = order[j];
+      order[j] = order[k];
+      order[k] = tmp;
+    }
+    const out = new Float64Array(n);
+    let pos = 0;
+    for (const b of order) {
+      const start = b * blockSize;
+      const end = Math.min(start + blockSize, n);
+      for (let i = start; i < end; i++) out[pos++] = src[i];
+    }
+    return out;
+  }
+
+  // Signal permutation test — the valid replacement for permutationTest
+  // above, and the default everywhere. Shuffles the fair/price RATIO series
+  // (the one primitive every strategy type derives its multiplier from),
+  // in contiguous 12-month blocks with a seeded RNG, and for every replicate
+  // reruns the ENTIRE strategy from scratch: buildStrategyMultipliers
+  // (calibration + clamps, recomputed on the shuffled signal — a threshold
+  // strategy's residual-band sigma included) and then the ledger. A
+  // threshold run's null replicates are therefore genuine threshold runs
+  // with their own real reserve history, not replayed multipliers.
+  //
+  // Records both BTC and total value per replicate and reports p-value +
+  // percentile for each, since a strategy that ties DCA on BTC accumulated
+  // but differs on cash left over (e.g. from starvation) is a different
+  // claim than one that beats DCA on BTC alone.
+  //
+  // s: same strategy spec as buildStrategyMultipliers's `s` (including
+  // s.lumpSumAtStart, applied via runWithLumpSum exactly like the real run).
+  function signalPermutationTest(fair, prices, deposit, s, fundingOpts, opts) {
+    opts = opts || {};
+    const iterations = opts.iterations || 2000;
+    const blockSize = opts.blockSize || 12;
+    const rng = opts.rng || mulberry32(opts.seed == null ? 42 : opts.seed);
+    const n = prices.length;
+
+    const ratio = new Float64Array(n);
+    for (let i = 0; i < n; i++) ratio[i] = fair[i] / prices[i];
+
+    function runFor(ratioArr) {
+      const fairArr = new Float64Array(n);
+      for (let i = 0; i < n; i++) fairArr[i] = ratioArr[i] * prices[i];
+      const mult = buildStrategyMultipliers(fairArr, prices, deposit, s, fundingOpts);
+      return runWithLumpSum(prices, mult, deposit, fundingOpts, !!s.lumpSumAtStart);
+    }
+
+    const observed = runFor(ratio);
+    const nullBtc = new Float64Array(iterations);
+    const nullTotalValue = new Float64Array(iterations);
+    const nullStarved = new Float64Array(iterations);
+    const nullInvested = new Float64Array(iterations);
+
+    for (let i = 0; i < iterations; i++) {
+      const shuffled = blockShuffle(ratio, blockSize, rng);
+      const run = runFor(shuffled);
+      nullBtc[i] = run.btc;
+      nullTotalValue[i] = run.totalValue;
+      nullStarved[i] = run.starvedMonths;
+      nullInvested[i] = run.invested;
+    }
+
+    const meanOf = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const deploymentRateOf = (invested) => (observed.deposited > 0 ? invested / observed.deposited : null);
+    const btcStats = summarizeNull(nullBtc, observed.btc);
+    const valueStats = summarizeNull(nullTotalValue, observed.totalValue);
+
+    return {
+      blockSize,
+      iterations,
+      observedBtc: observed.btc,
+      observedTotalValue: observed.totalValue,
+      observedStarvedMonths: observed.starvedMonths,
+      observedInvested: observed.invested,
+      observedDeploymentRate: deploymentRateOf(observed.invested),
+
+      // BTC stats, same field names as the legacy test so shared rendering
+      // code can treat either result interchangeably for the BTC half.
+      nullBtc: btcStats.sorted,
+      pValue: btcStats.pValue,
+      percentile: btcStats.percentile,
+      nullMean: btcStats.mean,
+      nullSd: btcStats.sd,
+      nullP05: btcStats.p05,
+      nullP95: btcStats.p95,
+
+      // Total-value stats — new in the signal-permutation test.
+      nullTotalValue: valueStats.sorted,
+      pValueTotalValue: valueStats.pValue,
+      percentileTotalValue: valueStats.percentile,
+      nullMeanTotalValue: valueStats.mean,
+      nullSdTotalValue: valueStats.sd,
+      nullP05TotalValue: valueStats.p05,
+      nullP95TotalValue: valueStats.p95,
+
+      nullMeanStarvedMonths: meanOf(nullStarved),
+      nullMeanInvested: meanOf(nullInvested),
+      nullMeanDeploymentRate: deploymentRateOf(meanOf(nullInvested)),
     };
   }
 
@@ -463,7 +605,8 @@
     const dca = runWithLumpSum(prices, ones, cfg.deposit, fundingOpts, true);
 
     const results = cfg.strategies.map((s) => {
-      const mult = buildStrategyMultipliers(fair, prices, cfg.deposit, { ...s, calibrate: cfg.calibrate }, fundingOpts);
+      const stratSpec = { ...s, calibrate: cfg.calibrate };
+      const mult = buildStrategyMultipliers(fair, prices, cfg.deposit, stratSpec, fundingOpts);
       const run = runWithLumpSum(prices, mult, cfg.deposit, fundingOpts, !!s.lumpSumAtStart);
       return {
         name: s.name,
@@ -471,6 +614,11 @@
         multipliers: mult,
         deltaVsDcaPct: 100 * (run.btc / dca.btc - 1),
         capture: captureRatio(run.btc, dca.btc, ceiling.btc),
+        // Default significance test — valid for every strategy type,
+        // threshold included (see signalPermutationTest).
+        signalPermutation: signalPermutationTest(fair, prices, cfg.deposit, stratSpec, fundingOpts),
+        // Legacy multiplier-permutation test, kept only for the
+        // "legacy — invalid for threshold" UI toggle.
         permutation: permutationTest(prices, mult, cfg.deposit, undefined, undefined, fundingOpts),
       };
     });
@@ -493,6 +641,8 @@
     perfectTiming,
     captureRatio,
     permutationTest,
+    signalPermutationTest,
+    blockShuffle,
     mulberry32,
     clamp,
     monthStarts,

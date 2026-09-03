@@ -1304,13 +1304,32 @@
     }
     clearDataError();
     el("benchmarkResults").hidden = false;
+    lastBenchmarkRun = { suite, strat };
     renderBenchmarkHeadline(suite, strat);
     renderAllocationChart(suite, strat);
+    refreshPermutationView();
+  }
+
+  // r.permutation is the legacy multiplier-permutation test (invalid for
+  // threshold — see benchmarks.js); r.signalPermutation is the default,
+  // valid for every strategy type. The toggle only changes which of the two
+  // already-computed results is displayed, so switching it never re-runs
+  // the (expensive) permutation simulation.
+  function selectedPermutation(r) {
+    return el("legacyPermutationToggle").checked ? r.permutation : r.signalPermutation;
+  }
+
+  // Re-renders everything that depends on which permutation test is
+  // selected, from the cached suite — called after a fresh run and again
+  // whenever the legacy toggle changes.
+  function refreshPermutationView() {
+    if (!lastBenchmarkRun) return;
+    const { suite, strat } = lastBenchmarkRun;
     renderPermutationChart(suite);
     renderDiagnosticsTable(suite);
-    lastBenchmarkRun = { suite, strat };
     const r = suite.results[0];
-    el("benchmarksHeadline").textContent = `${strat.name}: ${r.deltaVsDcaPct >= 0 ? "+" : ""}${fmtNum(r.deltaVsDcaPct, 1)}% vs. DCA · p ${fmtNum(r.permutation.pValue, 3)}`;
+    const perm = selectedPermutation(r);
+    el("benchmarksHeadline").textContent = `${strat.name}: ${r.deltaVsDcaPct >= 0 ? "+" : ""}${fmtNum(r.deltaVsDcaPct, 1)}% vs. DCA · p ${fmtNum(perm.pValue, 3)}`;
   }
 
   function renderBenchmarkHeadline(suite, strat) {
@@ -1350,14 +1369,34 @@
 
   function renderPermutationChart(suite) {
     const r = suite.results[0];
-    const perm = r.permutation;
+    const legacy = el("legacyPermutationToggle").checked;
+    const perm = selectedPermutation(r);
+
+    el("permutationModeHint").textContent = legacy
+      ? "LEGACY — invalid for the threshold strategy: this shuffles the MULTIPLIER array directly (same multipliers, only which month each lands on changes). A threshold strategy's multiplier already encodes its reserve-balance history, so a shuffled sequence is one the strategy could never actually have produced."
+      : `Shuffles the fair/price ratio itself, in contiguous ${perm.blockSize}-month blocks (seeded RNG), and reruns the full strategy — calibration, clamps, ledger — from scratch on every shuffle. Valid for every strategy type, including threshold.`;
+
     const spread = perm.nullP95 - perm.nullP05;
     const binWidth = spread > 0 ? spread / 30 : Math.max(perm.observedBtc * 0.02, 0.0001);
     const bins = Rolling.histogram(Array.from(perm.nullBtc), binWidth);
     Charts.createHistogramChart(el("permutationChart"), bins, perm.observedBtc, { xFormat: (v) => fmtBtc(v), height: 180 });
     el("permutationCaption").textContent =
-      `The real chronological ordering beat ${fmtNum(perm.percentile, 1)}% of ${perm.nullBtc.length} shuffled orderings ` +
-      `of the same multipliers (p ≈ ${fmtNum(perm.pValue, 4)}). Orange marker is the observed result.`;
+      `BTC accumulated: the real chronological ordering beat ${fmtNum(perm.percentile, 1)}% of ${perm.nullBtc.length} ` +
+      `shuffled ${legacy ? "orderings of the same multipliers" : "signals"} (p ≈ ${fmtNum(perm.pValue, 4)}). Orange marker is the observed result.`;
+
+    const valueSection = el("permutationValueSection");
+    if (legacy || perm.nullTotalValue == null) {
+      valueSection.hidden = true;
+      return;
+    }
+    valueSection.hidden = false;
+    const vSpread = perm.nullP95TotalValue - perm.nullP05TotalValue;
+    const vBinWidth = vSpread > 0 ? vSpread / 30 : Math.max(perm.observedTotalValue * 0.02, 0.01);
+    const vBins = Rolling.histogram(Array.from(perm.nullTotalValue), vBinWidth);
+    Charts.createHistogramChart(el("permutationValueChart"), vBins, perm.observedTotalValue, { xFormat: (v) => fmtUsd(v), height: 180 });
+    el("permutationValueCaption").textContent =
+      `Total value (BTC + cash left): the real chronological ordering beat ${fmtNum(perm.percentileTotalValue, 1)}% of ` +
+      `${perm.nullTotalValue.length} shuffled signals (p ≈ ${fmtNum(perm.pValueTotalValue, 4)}). Orange marker is the observed result.`;
   }
 
   // Real-vs-shuffled: same multipliers, only the month assignment shuffled.
@@ -1367,13 +1406,17 @@
   // different month ordering, not a timing signal.
   function renderDiagnosticsTable(suite) {
     const r = suite.results[0];
-    const perm = r.permutation;
+    const legacy = el("legacyPermutationToggle").checked;
+    const perm = selectedPermutation(r);
     const rows = [
       ["Starved months", String(perm.observedStarvedMonths), fmtNum(perm.nullMeanStarvedMonths, 1)],
       ["Total invested", fmtUsd(perm.observedInvested), fmtUsd(perm.nullMeanInvested)],
       ["Deployment rate", fmtPct(perm.observedDeploymentRate), fmtPct(perm.nullMeanDeploymentRate)],
       ["BTC accumulated", fmtBtc(perm.observedBtc), fmtBtc(perm.nullMean)],
     ];
+    if (!legacy && perm.observedTotalValue != null) {
+      rows.push(["Total value", fmtUsd(perm.observedTotalValue), fmtUsd(perm.nullMeanTotalValue)]);
+    }
     let html = "<thead><tr><th>Metric</th><th>Real (chronological)</th><th>Shuffled (mean of nulls)</th></tr></thead><tbody>";
     for (const [label, real, shuf] of rows) {
       html += `<tr><td>${label}</td><td data-label="Real">${real}</td><td data-label="Shuffled">${shuf}</td></tr>`;
@@ -1749,7 +1792,8 @@
     if (!lastBenchmarkRun) return "BENCHMARK\n(not yet run)";
     const { suite, strat } = lastBenchmarkRun;
     const r = suite.results[0];
-    const perm = r.permutation;
+    const legacy = el("legacyPermutationToggle").checked;
+    const perm = selectedPermutation(r);
     const code = shortStrategyCode(strat.name);
     const dcaBtc = suite.dca.btc;
     const nullVsDcaPct = dcaBtc > 0 ? ((perm.nullMean - dcaBtc) / dcaBtc) * 100 : null;
@@ -1759,12 +1803,21 @@
     lines.push(`worst timing     ${fmtNum(suite.minPossibleEdgePct, 1)}%`);
     lines.push(`captured  ${code}  ${r.capture == null ? "—" : fmtNum(r.capture * 100, 1) + "%"}`);
     lines.push("");
-    lines.push(`PERMUTATION (${perm.nullBtc.length} shuffles)`);
-    lines.push("        p      pctile  nullMean vs DCA");
     lines.push(
-      `${code.padEnd(6)}${fmtNum(perm.pValue, 3).padStart(6)}  ${fmtNum(perm.percentile, 1).padStart(8)}  ` +
+      legacy
+        ? `PERMUTATION — legacy, multiplier-shuffle, invalid for threshold (${perm.nullBtc.length} shuffles)`
+        : `PERMUTATION — signal-shuffle, ${perm.blockSize}mo blocks (${perm.nullBtc.length} shuffles)`
+    );
+    lines.push("            p      pctile  nullMean vs DCA");
+    lines.push(
+      `btc   ${code.padEnd(6)}${fmtNum(perm.pValue, 3).padStart(6)}  ${fmtNum(perm.percentile, 1).padStart(8)}  ` +
         `${nullVsDcaPct == null ? "—" : signedNum(nullVsDcaPct, 1) + "%"}`
     );
+    if (!legacy && perm.pValueTotalValue != null) {
+      lines.push(
+        `value ${code.padEnd(6)}${fmtNum(perm.pValueTotalValue, 3).padStart(6)}  ${fmtNum(perm.percentileTotalValue, 1).padStart(8)}`
+      );
+    }
     lines.push(`real starved ${perm.observedStarvedMonths} | shuffled mean ${fmtNum(perm.nullMeanStarvedMonths, 1)}`);
     lines.push(`real invested ${fmtNum(perm.observedInvested, 0)} | shuffled ${fmtNum(perm.nullMeanInvested, 0)}`);
     return lines.join("\n");
@@ -1905,6 +1958,7 @@
     });
 
     el("valueLogToggle").addEventListener("change", renderValueChart);
+    el("legacyPermutationToggle").addEventListener("change", refreshPermutationView);
     el("traceStrategy").addEventListener("change", renderTraceTable);
 
     el("resetBtn").addEventListener("click", () => {
