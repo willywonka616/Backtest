@@ -606,8 +606,10 @@
 
     const results = cfg.strategies.map((s) => {
       const stratSpec = { ...s, calibrate: cfg.calibrate };
-      const mult = buildStrategyMultipliers(fair, prices, cfg.deposit, stratSpec, fundingOpts);
-      const run = runWithLumpSum(prices, mult, cfg.deposit, fundingOpts, !!s.lumpSumAtStart);
+      // Same code path rollingWindowStudy uses for one window — see
+      // Backtest.runStrategy's comment for why this (not runLedger) is the
+      // right calibration scheme for a single self-contained window.
+      const { multipliers: mult, result: run } = B.runStrategy(prices, fair, dates, stratSpec, cfg.deposit, fundingOpts);
       return {
         name: s.name,
         run,

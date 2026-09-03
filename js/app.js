@@ -1590,16 +1590,31 @@
     const windowMonths = Number(el("rollingWindowMonths").value);
     const { dataStart, dataEnd } = rollingDataBounds();
 
+    // Every enabled strategy, DCA excluded (rolling computes its own DCA
+    // baseline per window above) — reuses buildStrategyDefs() so a strategy
+    // enabled here (threshold included, when state.threshold.enabled) is
+    // exactly the same strategy the backtest and benchmark panels show,
+    // never a second definition that can drift out of sync.
+    const strategies = buildStrategyDefs()
+      .filter((def) => def.key !== "dca")
+      .map((def) => ({
+        name: def.label,
+        color: def.color,
+        exponent: def.p,
+        strategyType: def.strategyType,
+        threshold: def.threshold,
+        mMin: def.mMin,
+        mMax: def.mMax,
+        targetDeployment: def.targetDeployment,
+      }));
+
     const cfg = {
       windowMonths,
       stepMonths: 1,
       deposit: state.deposit.linear || 500,
       fitMode: state.fitMode,
       calibrate: state.calibration,
-      strategies: [
-        { name: "2 · Power-law linear", exponent: 1, mMin: state.bounds.linear.mMin, mMax: state.bounds.linear.mMax },
-        { name: "3 · Power-law squared", exponent: 2, mMin: state.bounds.squared.mMin, mMax: state.bounds.squared.mMax },
-      ],
+      strategies,
       dataStart,
       dataEnd,
     };
@@ -1639,7 +1654,7 @@
     const dates = study.windows.map((w) => w.startDate);
     const series = cfg.strategies.map((s, i) => ({
       label: s.name,
-      color: i === 0 ? COLOR.linear : COLOR.squared,
+      color: s.color,
       values: study.windows.map((w) => w.strategies[i].deltaBtcPct),
     }));
     rollingDeltaChartInstance = destroyIfExists(rollingDeltaChartInstance);
@@ -1662,7 +1677,7 @@
       const card = document.createElement("div");
       card.className = "rolling-hist-card";
       const heading = document.createElement("h4");
-      heading.style.color = i === 0 ? COLOR.linear : COLOR.squared;
+      heading.style.color = cfg.strategies[i].color;
       heading.textContent = s.name;
       const chartDiv = document.createElement("div");
       card.appendChild(heading);

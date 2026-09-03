@@ -312,6 +312,46 @@
     return { trace, kMin: series.kMin, kMax: series.kMax, result, fundingOpts, lumpSumAtStart };
   }
 
+  // Builds one strategy's multiplier array over a SINGLE self-contained
+  // window (handles both 'power' and 'threshold' strategyType alike) and
+  // runs it through the shared ledger. This is the calibration scheme
+  // rollingWindowStudy and runBenchmarkSuite both need: a scalar k (or, for
+  // threshold, a numeric/band enterThreshold) computed from exactly the
+  // window passed in, with no "future" data outside it to guard against —
+  // unlike runLedger above, whose annual trailing no-lookahead calibration
+  // only makes sense across one continuous historical run, not a detached
+  // window. See Benchmarks.calibrationConstant's own comment for why the two
+  // schemes are deliberately different, not a bug to unify.
+  //
+  // Delegates multiplier construction to Benchmarks.buildStrategyMultipliers
+  // (the one place implementing both the power-law formula and the
+  // threshold strategy's own stateful forward pass), so every caller that
+  // operates on one closed window — rolling.js and benchmarks.js's
+  // runBenchmarkSuite — shares this exact code path instead of each keeping
+  // its own copy. rolling.js used to keep an inline power-formula-only copy
+  // that silently produced nonsense (or NaN) for a threshold strategy;
+  // routing it through here is what fixes that.
+  //
+  // prices, fair: Float64Array, parallel, one purchase-date window.
+  // dates: the window's purchase dates (ISO strings) — the self-contained
+  // calibration below doesn't consult them itself (there's no "future" to
+  // guard against within one closed window); accepted for parity with the
+  // other multiplier-series builders and so callers already holding a dates
+  // slice don't need to discard it to call this.
+  // strategyCfg: {strategyType, exponent, mMin, mMax, calibrate,
+  //               targetDeployment, threshold: {...}, lumpSumAtStart}
+  // fundingOpts: {fundingMode, startingCapital, reserveRateAnnual}
+  //
+  // Returns {multipliers, result} where result is the raw ledger result
+  // (Benchmarks.simulateLedger, run via runWithLumpSum so lumpSumAtStart is
+  // honored exactly as it is for the main backtest).
+  function runStrategy(prices, fair, dates, strategyCfg, deposit, fundingOpts) {
+    fundingOpts = fundingOpts || {};
+    const multipliers = global.Benchmarks.buildStrategyMultipliers(fair, prices, deposit, strategyCfg, fundingOpts);
+    const result = global.Benchmarks.runWithLumpSum(prices, multipliers, deposit, fundingOpts, !!strategyCfg.lumpSumAtStart);
+    return { multipliers, result };
+  }
+
   // ---- Metrics ----------------------------------------------------------
 
   // opts.startingCapital: committed at t0 for every strategy alike (default 0).
@@ -476,6 +516,7 @@
     computeKMap,
     computeMultiplierSeries,
     runLedger,
+    runStrategy,
     computeMetrics,
     compareToBaseline,
     computeXIRR,

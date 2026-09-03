@@ -8,11 +8,12 @@
   "use strict";
 
   const BM = global.Benchmarks;
+  const B = global.Backtest;
 
   // cfg: {
   //   windowMonths (default 48), stepMonths (default 1),
   //   deposit, fitMode ('expanding'|'full'), calibrate,
-  //   strategies: [{name, exponent, mMin, mMax}],
+  //   strategies: [{name, exponent, mMin, mMax} | {name, strategyType: 'threshold', mMin, mMax, threshold}],
   //   dataStart, dataEnd  bounds of the usable series
   // }
   // Returns { windows, byStrategy, nonOverlapping, effectiveN }.
@@ -40,20 +41,32 @@
 
     const windows = [];
 
+    // Pinned explicitly (rather than left to simulateLedger's own defaults)
+    // so it's structurally obvious that every window's reserve starts at
+    // zero, never carrying a balance in from the previous window: each
+    // Backtest.runStrategy call below is a fresh, stateless call with this
+    // same fundingOpts object, and simulateLedger seeds its running balance
+    // from fundingOpts.startingCapital anew every time it's called — there
+    // is no shared state across iterations of this loop for it to carry.
+    const fundingOpts = { fundingMode: "strict", startingCapital: 0, reserveRateAnnual: 0 };
+
     for (let start = 0; start + windowMonths <= total; start += step) {
       const end = start + windowMonths;
+      const dates = allDates.slice(start, end);
       const prices = allPrices.subarray(start, end);
       const fair = allFair.subarray(start, end);
 
       const ones = new Float64Array(windowMonths).fill(1);
-      const dca = BM.simulateLedger(prices, ones, cfg.deposit);
+      const dca = BM.simulateLedger(prices, ones, cfg.deposit, fundingOpts);
 
       const perStrategy = cfg.strategies.map((s) => {
-        const k = cfg.calibrate
-          ? BM.calibrationConstant(fair, prices, s.exponent, allDates.slice(start, end))
-          : 1;
-        const mult = Float64Array.from(prices, (p, i) => BM.clamp(k * Math.pow(fair[i] / p, s.exponent), s.mMin, s.mMax));
-        const run = BM.simulateLedger(prices, mult, cfg.deposit);
+        const strategyCfg = { ...s, calibrate: cfg.calibrate };
+        // Same code path runBenchmarkSuite uses — handles 'power' and
+        // 'threshold' alike, instead of the power-formula-only .map() this
+        // used to inline here (which silently mishandled a threshold
+        // strategy: it has no .exponent, so Math.pow(ratio, undefined) is
+        // NaN throughout).
+        const { multipliers: mult, result: run } = B.runStrategy(prices, fair, dates, strategyCfg, cfg.deposit, fundingOpts);
         return {
           name: s.name,
           deltaBtcPct: 100 * (run.btc / dca.btc - 1),

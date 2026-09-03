@@ -572,6 +572,90 @@
       );
     });
 
+    // 29. rollingWindowStudy and the main backtest must agree exactly on BTC
+    // accumulated when asked the same question: one strategy, over one
+    // window, with no calibration (k≡1) or trailing residual band to make
+    // the two systems' genuinely different calibration schemes diverge (see
+    // Backtest.runStrategy's comment — the main backtest's annual trailing
+    // no-lookahead k and the self-contained per-window k are deliberately
+    // different algorithms, not comparable when calibration is actually
+    // engaged). fitMode 'full' also makes the fair-value fit itself
+    // independent of which window/context computed it. Under those
+    // controls, both paths must reduce to literally the same multiplier
+    // array and the same simulateLedger call — this is the regression test
+    // for rolling.js silently skipping (NaN-ing) the threshold strategy
+    // instead of running it through Backtest.runStrategy like every other
+    // strategy type.
+    check("29. rollingWindowStudy matches the main backtest's BTC, for all three strategy types", (assert) => {
+      const dataStart = "2018-01-01";
+      const dataEnd = "2021-12-01";
+      const deposit = 500;
+
+      const cases = [
+        {
+          label: "linear power-law",
+          rollingStrategy: { name: "Linear", exponent: 1, mMin: 0, mMax: 5 },
+          backtestParams: { p: 1, mMin: 0, mMax: 5 },
+        },
+        {
+          label: "squared power-law",
+          rollingStrategy: { name: "Squared", exponent: 2, mMin: 0, mMax: 5 },
+          backtestParams: { p: 2, mMin: 0, mMax: 5 },
+        },
+        {
+          label: "threshold",
+          rollingStrategy: {
+            name: "Threshold",
+            strategyType: "threshold",
+            mMin: 0,
+            mMax: 4,
+            threshold: { enterThreshold: 1.3, baseRate: 0.6, reserveSpendFraction: 0.25, useBand: false },
+          },
+          backtestParams: {
+            p: 0,
+            mMin: 0,
+            mMax: 4,
+            strategyType: "threshold",
+            threshold: { enterThreshold: 1.3, baseRate: 0.6, reserveSpendFraction: 0.25, useBand: false },
+          },
+        },
+      ];
+
+      for (const c of cases) {
+        const total = BM.monthStarts(dataStart, dataEnd).length;
+        const study = R.rollingWindowStudy({
+          windowMonths: total,
+          stepMonths: 1,
+          deposit,
+          fitMode: "full",
+          calibrate: false,
+          strategies: [c.rollingStrategy],
+          dataStart,
+          dataEnd,
+        });
+        assert(study.windows.length === 1, `${c.label}: expected exactly one window spanning the full range, got ${study.windows.length}`);
+        const w = study.windows[0];
+        const rollingBtc = w.dcaBtc * (1 + w.strategies[0].deltaBtcPct / 100);
+
+        const data = global.BTC_DATA;
+        const context = B.prepareFairValueContext(data, dataStart, dataEnd, "full");
+        const params = {
+          ...c.backtestParams,
+          deposit,
+          fundingMode: "strict",
+          startingCapital: 0,
+          reserveRateAnnual: 0,
+          lumpSumAtStart: false,
+        };
+        const { result } = B.runLedger(data, context, params, false);
+
+        assert(
+          approxEqual(rollingBtc, result.btc, 1e-6),
+          `${c.label}: rollingWindowStudy btc=${rollingBtc} != main backtest btc=${result.btc}`
+        );
+      }
+    });
+
     return results;
   }
 
